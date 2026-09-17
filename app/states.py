@@ -147,6 +147,11 @@ class AdminStates(StatesGroup):
     editing_daily_contest_field = State()
     editing_daily_contest_value = State()
 
+    # Розыгрыш билетов за покупку
+    creating_raffle_campaign_name = State()
+    creating_raffle_campaign_winners = State()
+    creating_raffle_campaign_prize_value = State()
+
     editing_squad_price = State()
     editing_traffic_price = State()
     editing_device_price = State()

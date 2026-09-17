@@ -33,6 +33,7 @@ from .admin_payments import router as admin_payments_router
 from .admin_pinned_messages import router as admin_pinned_messages_router
 from .admin_policies import router as admin_policies_router
 from .admin_promo_offers import router as admin_promo_offers_router
+from .admin_raffle import router as admin_raffle_router
 from .admin_promocodes import promo_groups_router as admin_promo_groups_router, router as admin_promocodes_router
 from .admin_reachability import router as admin_reachability_router
 from .admin_referral_network import router as admin_referral_network_router
@@ -54,6 +55,7 @@ from .auth import router as auth_router
 from .balance import router as balance_router
 from .branding import router as branding_router
 from .contests import router as contests_router
+from .raffle import router as raffle_router
 from .coupon import router as coupon_router
 from .gift import router as gift_router
 from .info import router as info_router
@@ -115,6 +117,7 @@ router.include_router(promocode_router)
 router.include_router(activity_router)
 router.include_router(coupon_router)
 router.include_router(contests_router)
+router.include_router(raffle_router)
 router.include_router(polls_router)
 router.include_router(promo_router)
 router.include_router(notifications_router)
@@ -136,6 +139,7 @@ router.include_router(admin_ticket_notifications_router)
 router.include_router(admin_tickets_router)
 router.include_router(admin_settings_router)
 router.include_router(admin_wheel_router)
+router.include_router(admin_raffle_router)
 router.include_router(admin_tariffs_router)
 router.include_router(admin_servers_router)
 router.include_router(admin_stats_router)
