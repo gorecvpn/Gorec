@@ -9,6 +9,7 @@ from pydantic import BaseModel
 
 from app.database.models import User
 from app.services.version_service import version_service
+from app.config import settings
 
 from ..dependencies import require_permission
 
@@ -43,7 +44,14 @@ class ReleasesResponse(BaseModel):
 
 # ============ Cabinet releases cache ============
 
-CABINET_REPO = 'BEDOLAGA-DEV/bedolaga-cabinet'
+DEFAULT_CABINET_REPO = 'gorecvpn/Gorec-Cabinet'
+
+
+def _cabinet_repo() -> str:
+    """GitHub owner/name for cabinet release checks (admin updates UI)."""
+    configured = (getattr(settings, 'CABINET_VERSION_CHECK_REPO', None) or '').strip()
+    return configured or DEFAULT_CABINET_REPO
+
 _cabinet_cache: dict = {}
 _cabinet_last_check: datetime | None = None
 _CACHE_TTL = 3600
@@ -56,7 +64,7 @@ async def _fetch_cabinet_releases(force: bool = False) -> list[dict]:
         if datetime.now(UTC) - _cabinet_last_check < timedelta(seconds=_CACHE_TTL):
             return _cabinet_cache['releases']
 
-    url = f'https://api.github.com/repos/{CABINET_REPO}/releases'
+    url = f'https://api.github.com/repos/{_cabinet_repo()}/releases'
 
     try:
         timeout = aiohttp.ClientTimeout(total=10)
@@ -133,7 +141,7 @@ async def get_releases(
         current_version=cabinet_current,
         has_updates=False,
         releases=cabinet_releases,
-        repo_url=f'https://github.com/{CABINET_REPO}',
+        repo_url=f'https://github.com/{_cabinet_repo()}',
     )
 
     return ReleasesResponse(bot=bot_info, cabinet=cabinet_info)

@@ -1459,6 +1459,7 @@ class Settings(BaseSettings):
 
     VERSION_CHECK_ENABLED: bool = True
     VERSION_CHECK_REPO: str = 'gorecvpn/GorecVPN-'
+    CABINET_VERSION_CHECK_REPO: str = 'gorecvpn/Gorec-Cabinet'
     VERSION_CHECK_INTERVAL_HOURS: int = 1
 
     BACKUP_AUTO_ENABLED: bool = True
