@@ -33,8 +33,8 @@ from .admin_payments import router as admin_payments_router
 from .admin_pinned_messages import router as admin_pinned_messages_router
 from .admin_policies import router as admin_policies_router
 from .admin_promo_offers import router as admin_promo_offers_router
-from .admin_raffle import router as admin_raffle_router
 from .admin_promocodes import promo_groups_router as admin_promo_groups_router, router as admin_promocodes_router
+from .admin_raffle import router as admin_raffle_router
 from .admin_reachability import router as admin_reachability_router
 from .admin_referral_network import router as admin_referral_network_router
 from .admin_remnawave import router as admin_remnawave_router
@@ -55,7 +55,6 @@ from .auth import router as auth_router
 from .balance import router as balance_router
 from .branding import router as branding_router
 from .contests import router as contests_router
-from .raffle import router as raffle_router
 from .coupon import router as coupon_router
 from .gift import router as gift_router
 from .info import router as info_router
@@ -69,6 +68,7 @@ from .partner_application import router as partner_application_router
 from .polls import router as polls_router
 from .promo import router as promo_router
 from .promocode import router as promocode_router
+from .raffle import router as raffle_router
 from .referral import router as referral_router
 from .site_verification import router as site_verification_router
 from .subscription import router as subscription_router

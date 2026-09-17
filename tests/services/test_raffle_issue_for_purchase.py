@@ -142,9 +142,7 @@ async def test_issue_for_purchase_creates_once(raffle_enabled, active_campaign, 
         AsyncMock(return_value=None),
     )
 
-    result = await raffle_service.issue_for_purchase(
-        _stub_db(), user_id=42, transaction_id=777, tariff_id=3
-    )
+    result = await raffle_service.issue_for_purchase(_stub_db(), user_id=42, transaction_id=777, tariff_id=3)
     assert result == [created]
 
 
@@ -202,8 +200,6 @@ async def test_issue_uses_tickets_by_tariff(raffle_enabled, active_campaign, mon
     monkeypatch.setattr(raffle_service.raffle_crud, 'create_ticket', AsyncMock(side_effect=_create))
     monkeypatch.setattr(raffle_service, '_notify_user_ticket', AsyncMock(return_value=None))
 
-    result = await raffle_service.issue_for_purchase(
-        _stub_db(), user_id=42, transaction_id=900, tariff_id=3
-    )
+    result = await raffle_service.issue_for_purchase(_stub_db(), user_id=42, transaction_id=900, tariff_id=3)
     assert len(result) == 3
     assert [t.ticket_index for t in result] == [0, 1, 2]

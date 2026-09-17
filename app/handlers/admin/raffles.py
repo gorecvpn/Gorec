@@ -66,9 +66,7 @@ async def _render_menu(db: AsyncSession) -> tuple[str, types.InlineKeyboardMarku
 
 @admin_required
 @error_handler
-async def show_raffles_menu(
-    callback: types.CallbackQuery, db_user: User, db: AsyncSession, state: FSMContext
-):
+async def show_raffles_menu(callback: types.CallbackQuery, db_user: User, db: AsyncSession, state: FSMContext):
     await state.clear()
     text, markup = await _render_menu(db)
     await callback.message.edit_text(text, reply_markup=markup)
@@ -227,8 +225,7 @@ async def view_campaign(callback: types.CallbackQuery, db_user: User, db: AsyncS
         for winner in winners:
             mark = '✅' if winner.awarded else '⏳'
             lines.append(
-                f'{winner.place}. user#{winner.user_id} '
-                f'<code>{html.escape(winner.ticket_code or "")}</code> {mark}'
+                f'{winner.place}. user#{winner.user_id} <code>{html.escape(winner.ticket_code or "")}</code> {mark}'
             )
 
     rows: list[list[types.InlineKeyboardButton]] = []

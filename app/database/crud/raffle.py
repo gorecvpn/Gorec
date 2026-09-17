@@ -71,9 +71,7 @@ async def get_campaign_by_id(db: AsyncSession, campaign_id: int) -> RaffleCampai
 
 
 async def list_campaigns(db: AsyncSession, *, limit: int = 50, offset: int = 0) -> list[RaffleCampaign]:
-    result = await db.execute(
-        select(RaffleCampaign).order_by(RaffleCampaign.id.desc()).offset(offset).limit(limit)
-    )
+    result = await db.execute(select(RaffleCampaign).order_by(RaffleCampaign.id.desc()).offset(offset).limit(limit))
     return list(result.scalars().all())
 
 
@@ -101,8 +99,6 @@ async def get_current_active_campaign(db: AsyncSession) -> RaffleCampaign | None
         .limit(1)
     )
     return result.scalar_one_or_none()
-
-
 
 
 async def get_ticket_by_campaign_tx(
@@ -164,17 +160,11 @@ async def create_ticket(
 
 
 async def get_campaign_ticket_stats(db: AsyncSession, campaign_id: int) -> dict[str, int]:
-    tickets_q = await db.execute(
-        select(func.count(RaffleTicket.id)).where(RaffleTicket.campaign_id == campaign_id)
-    )
+    tickets_q = await db.execute(select(func.count(RaffleTicket.id)).where(RaffleTicket.campaign_id == campaign_id))
     users_q = await db.execute(
-        select(func.count(func.distinct(RaffleTicket.user_id))).where(
-            RaffleTicket.campaign_id == campaign_id
-        )
+        select(func.count(func.distinct(RaffleTicket.user_id))).where(RaffleTicket.campaign_id == campaign_id)
     )
-    winners_q = await db.execute(
-        select(func.count(RaffleWinner.id)).where(RaffleWinner.campaign_id == campaign_id)
-    )
+    winners_q = await db.execute(select(func.count(RaffleWinner.id)).where(RaffleWinner.campaign_id == campaign_id))
     return {
         'tickets': int(tickets_q.scalar() or 0),
         'unique_users': int(users_q.scalar() or 0),
