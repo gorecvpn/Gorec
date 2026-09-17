@@ -35,8 +35,6 @@ class RaffleCampaignSummary(BaseModel):
     max_winners: int
     tickets_per_purchase: int = 1
     tickets_by_tariff: dict[str, int] | None = None
-    pool_tickets: int = 0
-    pool_users: int = 0
 
 
 class RaffleTicketItem(BaseModel):
@@ -70,7 +68,7 @@ async def get_raffle_summary(
         return RaffleSummaryResponse(enabled=True, campaign=None, tickets=[], ticket_count=0)
 
     tickets = await raffle_crud.list_tickets_for_user(db, user.id, campaign_id=campaign.id)
-    stats = await raffle_crud.get_campaign_ticket_stats(db, campaign.id)
+    # Intentionally omit pool ticket/participant counts from the user-facing API.
     return RaffleSummaryResponse(
         enabled=True,
         campaign=RaffleCampaignSummary(
@@ -87,8 +85,6 @@ async def get_raffle_summary(
             max_winners=max_winners_for_campaign(campaign),
             tickets_per_purchase=int(getattr(campaign, 'tickets_per_purchase', 1) or 1),
             tickets_by_tariff=getattr(campaign, 'tickets_by_tariff', None),
-            pool_tickets=stats.get('tickets', 0),
-            pool_users=stats.get('unique_users', 0),
         ),
         tickets=[
             RaffleTicketItem(

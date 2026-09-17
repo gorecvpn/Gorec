@@ -6,7 +6,7 @@ from datetime import UTC, datetime
 from typing import Any
 
 import structlog
-from sqlalchemy import and_, func, select
+from sqlalchemy import and_, delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -256,3 +256,65 @@ async def list_tickets_for_user(
     stmt = stmt.order_by(RaffleTicket.created_at.desc()).limit(limit)
     result = await db.execute(stmt)
     return list(result.scalars().all())
+
+
+async def update_campaign(
+    db: AsyncSession,
+    campaign: RaffleCampaign,
+    *,
+    name: str | None = None,
+    description: Any = ...,
+    starts_at: Any = ...,
+    ends_at: Any = ...,
+    max_winners: int | None = None,
+    prize_type: str | None = None,
+    prize_value: Any = ...,
+    prize_text: Any = ...,
+    prize_slots: Any = ...,
+    tickets_per_purchase: int | None = None,
+    tickets_by_tariff: Any = ...,
+    skip_trial_purchases: bool | None = None,
+) -> RaffleCampaign:
+    """Patch campaign fields. Ellipsis (...) means leave unchanged for nullable fields."""
+    if name is not None:
+        campaign.name = name
+    if description is not ...:
+        campaign.description = description
+    if starts_at is not ... and starts_at is not None:
+        campaign.starts_at = starts_at
+    if ends_at is not ...:
+        campaign.ends_at = ends_at
+    if max_winners is not None:
+        campaign.max_winners = max(1, int(max_winners))
+    if prize_type is not None:
+        campaign.prize_type = prize_type
+    if prize_value is not ...:
+        campaign.prize_value = prize_value
+    if prize_text is not ...:
+        campaign.prize_text = prize_text
+    if prize_slots is not ...:
+        slots = prize_slots or None
+        campaign.prize_slots = slots
+        if slots:
+            campaign.max_winners = max(1, len(slots))
+    if tickets_per_purchase is not None:
+        campaign.tickets_per_purchase = max(1, min(50, int(tickets_per_purchase)))
+    if tickets_by_tariff is not ...:
+        campaign.tickets_by_tariff = tickets_by_tariff or None
+    if skip_trial_purchases is not None:
+        campaign.skip_trial_purchases = bool(skip_trial_purchases)
+    campaign.updated_at = datetime.now(UTC)
+    await db.commit()
+    await db.refresh(campaign)
+    logger.info('Обновлена кампания розыгрыша', campaign_id=campaign.id)
+    return campaign
+
+
+async def delete_campaign(db: AsyncSession, campaign: RaffleCampaign) -> None:
+    """Delete campaign; tickets/winners removed explicitly then campaign (FK CASCADE backup)."""
+    campaign_id = campaign.id
+    await db.execute(delete(RaffleWinner).where(RaffleWinner.campaign_id == campaign_id))
+    await db.execute(delete(RaffleTicket).where(RaffleTicket.campaign_id == campaign_id))
+    await db.delete(campaign)
+    await db.commit()
+    logger.info('Удалена кампания розыгрыша', campaign_id=campaign_id)
