@@ -30,7 +30,7 @@ test: ## Запустить тесты
 # Имя и порт совпадают с тем, что прописано в CI-workflow tests.yml, образ —
 # с docker-compose.yml. Порт 55433 выбран нестандартным, чтобы не столкнуться
 # с локальной боевой базой на 5432.
-PG_TEST_CONTAINER ?= bedolaga_test_pg
+PG_TEST_CONTAINER ?= gorecbot_test_pg
 PG_TEST_PORT ?= 55433
 PG_TEST_URL ?= postgresql+asyncpg://test:test@localhost:$(PG_TEST_PORT)/test
 

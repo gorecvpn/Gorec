@@ -1,4 +1,4 @@
-# 🤝 Contributing to Remnawave Bedolaga Bot
+# 🤝 Contributing to GorecBot
 
 Спасибо за интерес к развитию проекта! Этот документ содержит правила и рекомендации для контрибьюторов.
 
@@ -99,8 +99,8 @@
 
 1. **Форкните и клонируйте репозиторий:**
 ```bash
-git clone https://github.com/Fr1ngg/remnawave-bedolaga-telegram-bot.git
-cd remnawave-bedolaga-telegram-bot
+git clone https://github.com/Fr1ngg/GorecVPN-.git
+cd GorecVPN-
 ```
 
 2. **Поставьте зависимости:**
@@ -127,7 +127,7 @@ python main.py
 ### Структура проекта
 
 ```
-bedolaga_bot/
+gorecbot/
 ├── app/                     # Основной код приложения
 │   ├── handlers/           # Обработчики сообщений
 │   ├── services/           # Бизнес-логика
@@ -478,7 +478,7 @@ def test_calculate_renewal_price():
 
 ### Каналы связи
 
-- **💬 Telegram Group:** [Bedolaga Chat](https://t.me/+wTdMtSWq8YdmZmVi) - общие вопросы
+- **💬 Telegram Group:** [GorecBot Chat](https://t.me/+wTdMtSWq8YdmZmVi) - общие вопросы
 - **🐛 GitHub Issues:** Технические вопросы и баги
 - **📧 Прямой контакт:** [@fringg](https://t.me/fringg) - только критические вопросы
 
@@ -511,7 +511,7 @@ A: Проверьте конфигурацию .env и убедитесь, чт�
 
 ## 🎉 Благодарности
 
-Спасибо всем, кто вносит вклад в развитие проекта! Ваша помощь делает Bedolaga Bot лучше для всего сообщества.
+Спасибо всем, кто вносит вклад в развитие проекта! Ваша помощь делает GorecBot лучше для всего сообщества.
 
 ---
 

@@ -1,4 +1,4 @@
-name: BedolagaBot
+name: GorecBot
 
 on:
   push:
@@ -35,19 +35,19 @@ jobs:
 
         if [[ $GITHUB_REF == refs/tags/* ]]; then
           VERSION=${GITHUB_REF#refs/tags/}
-          TAGS="fr1ngg/remnawave-bedolaga-telegram-bot:latest,fr1ngg/remnawave-bedolaga-telegram-bot:${VERSION}"
+          TAGS="gorecvpn/GorecVPN-:latest,gorecvpn/GorecVPN-:${VERSION}"
           echo "🏷️ Собираем релизную версию: $VERSION"
         elif [[ $GITHUB_REF == refs/heads/main ]]; then
           VERSION="v${BASE_VERSION}-${SHORT_SHA}"
-          TAGS="fr1ngg/remnawave-bedolaga-telegram-bot:latest,fr1ngg/remnawave-bedolaga-telegram-bot:${VERSION}"
+          TAGS="gorecvpn/GorecVPN-:latest,gorecvpn/GorecVPN-:${VERSION}"
           echo "🚀 Собираем версию из main: $VERSION"
         elif [[ $GITHUB_REF == refs/heads/dev ]]; then
           VERSION="v${BASE_VERSION}-dev-${SHORT_SHA}"
-          TAGS="fr1ngg/remnawave-bedolaga-telegram-bot:dev,fr1ngg/remnawave-bedolaga-telegram-bot:${VERSION}"
+          TAGS="gorecvpn/GorecVPN-:dev,gorecvpn/GorecVPN-:${VERSION}"
           echo "🧪 Собираем dev версию: $VERSION"
         else
           VERSION="v${BASE_VERSION}-pr-${SHORT_SHA}"
-          TAGS="fr1ngg/remnawave-bedolaga-telegram-bot:pr-${SHORT_SHA}"
+          TAGS="gorecvpn/GorecVPN-:pr-${SHORT_SHA}"
           echo "🔀 Собираем PR версию: $VERSION"
         fi
 
@@ -87,7 +87,7 @@ jobs:
           org.opencontainers.image.version=${{ steps.version.outputs.version }}
           org.opencontainers.image.created=${{ steps.version.outputs.build_date }}
           org.opencontainers.image.revision=${{ steps.version.outputs.short_sha }}
-          org.opencontainers.image.title=Bedolaga RemnaWave Bot
+          org.opencontainers.image.title=GorecBot
           org.opencontainers.image.description=Telegram bot for RemnaWave VPN service
           org.opencontainers.image.source=https://github.com/${{ github.repository }}
 
@@ -110,4 +110,4 @@ jobs:
         echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
         echo "" >> $GITHUB_STEP_SUMMARY
         echo "### 🔗 Ссылки:" >> $GITHUB_STEP_SUMMARY
-        echo "- [Docker Hub Repository](https://hub.docker.com/r/fr1ngg/remnawave-bedolaga-telegram-bot)" >> $GITHUB_STEP_SUMMARY
+        echo "- [Docker Hub Repository](https://hub.docker.com/r/gorecvpn/GorecVPN-)" >> $GITHUB_STEP_SUMMARY

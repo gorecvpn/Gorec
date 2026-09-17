@@ -1,8 +1,8 @@
 <div align="center">
 
-<img src=".github/assets/logo.png" alt="Bedolaga Bot" width="800" />
+<img src=".github/assets/logo.png" alt="GorecBot" width="800" />
 
-# Bedolaga Bot
+# GorecBot
 
 **Telegram-бот для автоматизации VPN-бизнеса на базе [Remnawave](https://github.com/remnawave/backend)**
 
@@ -19,15 +19,15 @@
 
 ---
 
-## 🧩 Что такое Bedolaga?
+## 🧩 Что такое GorecBot?
 
-Bedolaga — полнофункциональная платформа для продажи VPN-подписок через Telegram. Бот интегрируется с панелью [Remnawave](https://github.com/remnawave/backend) и берёт на себя весь цикл: от регистрации пользователя до автопродления подписки.
+GorecBot — полнофункциональная платформа для продажи VPN-подписок через Telegram. Бот интегрируется с панелью [Remnawave](https://github.com/remnawave/backend) и берёт на себя весь цикл: от регистрации пользователя до автопродления подписки.
 
-> 🖥 **[Bedolaga Cabinet](https://github.com/BEDOLAGA-DEV/bedolaga-cabinet)** — веб-кабинет на React + TypeScript, который существенно расширяет возможности бота: личный кабинет, OAuth-авторизация (Google, Yandex, Discord, VK, Telegram OIDC), лендинги, аналитика продаж, RBAC и подарочные подписки.
+> 🖥 **[GorecBot Cabinet](https://github.com/BEDOLAGA-DEV/bedolaga-cabinet)** — веб-кабинет на React + TypeScript, который существенно расширяет возможности бота: личный кабинет, OAuth-авторизация (Google, Yandex, Discord, VK, Telegram OIDC), лендинги, аналитика продаж, RBAC и подарочные подписки.
 
 <div align="center">
 
-<img src=".github/assets/bot-preview.png" alt="Bedolaga Bot — Telegram" width="700" />
+<img src=".github/assets/bot-preview.png" alt="GorecBot — Telegram" width="700" />
 
 </div>
 
@@ -105,7 +105,7 @@ Bedolaga — полнофункциональная платформа для п
 
 ## 🎁 Подарочные подписки (Subscription Gifting)
 
-Bedolaga поддерживает полный кросс-канальный жизненный цикл покупки, управления и активации подарочных подписок как нативно в Telegram-боте, так и через веб-кабинет [Bedolaga Cabinet](https://github.com/BEDOLAGA-DEV/bedolaga-cabinet).
+GorecBot поддерживает полный кросс-канальный жизненный цикл покупки, управления и активации подарочных подписок как нативно в Telegram-боте, так и через веб-кабинет [GorecBot Cabinet](https://github.com/BEDOLAGA-DEV/bedolaga-cabinet).
 
 ### 🔑 Канонический формат кода и идентификация
 
@@ -143,7 +143,7 @@ Bedolaga поддерживает полный кросс-канальный ж�
 Бэкенд предоставляет и тестирует полный контракт API для подарочных подписок:
 - **Канонические поля**: `gift_code` (публичный код `GIFT_<59_chars>`), `bot_claim_url` (`https://t.me/<bot>?start=GIFT_<59_chars>`) и `cabinet_claim_url` (`https://<cabinet>/buy/gift/<64_chars>`) возвращаются в ответах `/gift/purchase`, `/gift/purchase/{token}`, `/gift/sent` и `/landing/purchase/{token}`, `/landing/gift/{token}` для всех активных (`PAID` / `PENDING_ACTIVATION`) подарков. Для доставленных подарков (`DELIVERED`) поля действий сбрасываются в `None`, сохраняя историю.
 - **Обратная совместимость**: Устаревшие поля (`purchase_token`, `token`, `claim_url`, `bot_claim_link`) сохраняются без изменений. Эндпоинт активации `/gift/activate` продолжает принимать короткие 8/12-символьные коды, префиксы `GIFT-`, канонические `GIFT_...` коды и URL-ссылки.
-- **Граница внешнего фронтенда**: Этот репозиторий содержит бэкенд и тесты контракта API. Внешний веб-кабинет ([Bedolaga Cabinet](https://github.com/BEDOLAGA-DEV/bedolaga-cabinet)) разрабатывается в отдельном репозитории и должен отображать новые канонические поля `gift_code`, `bot_claim_url` и `cabinet_claim_url` для визуального паритета с ботом.
+- **Граница внешнего фронтенда**: Этот репозиторий содержит бэкенд и тесты контракта API. Внешний веб-кабинет ([GorecBot Cabinet](https://github.com/BEDOLAGA-DEV/bedolaga-cabinet)) разрабатывается в отдельном репозитории и должен отображать новые канонические поля `gift_code`, `bot_claim_url` и `cabinet_claim_url` для визуального паритета с ботом.
 
 ---
 
@@ -184,7 +184,7 @@ Bedolaga поддерживает полный кросс-канальный ж�
 
 </div>
 
-> 🔸 — официальный партнёр Bedolaga (особые условия по кодовому слову **`bedolaga`**)
+> 🔸 — официальный партнёр GorecBot (особые условия по кодовому слову **`bedolaga`**)
 >
 > Все провайдеры работают параллельно через единый веб-сервер на порту 8080. Подробная настройка — в [документации](https://docs.bedolagam.ru/bot/payments).
 
@@ -197,7 +197,7 @@ Bedolaga поддерживает полный кросс-канальный ж�
 
 **🤝 Официальный партнёр Platega**
 
-Bedolaga — официальный партнёр платёжной системы **Platega**.<br>
+GorecBot — официальный партнёр платёжной системы **Platega**.<br>
 Пользователи бота получают **особые условия** при подключении по кодовому слову **`bedolaga`**
 
 📩 По вопросам: [@ArstanPlatega](https://t.me/ArstanPlatega)
@@ -209,7 +209,7 @@ Bedolaga — официальный партнёр платёжной систе
 
 **🤝 Официальный партнёр PayPear**
 
-Bedolaga — официальный партнёр платёжной системы **[PayPear](https://paypear.ru)**.<br>
+GorecBot — официальный партнёр платёжной системы **[PayPear](https://paypear.ru)**.<br>
 Банковские карты, СБП, SberPay и T-Pay — всё через единый API.<br>
 Подключение по **спец. условиям** через кодовое слово **`БЕДОЛАГА`**
 
@@ -220,7 +220,7 @@ Bedolaga — официальный партнёр платёжной систе
 
 **🤝 Официальный партнёр RollyPay**
 
-Bedolaga — официальный партнёр платёжного шлюза **[RollyPay](https://rollypay.io/?utm_source=bedolaga&utm_medium=community&utm_campaign=integration)**.<br>
+GorecBot — официальный партнёр платёжного шлюза **[RollyPay](https://rollypay.io/?utm_source=bedolaga&utm_medium=community&utm_campaign=integration)**.<br>
 СБП (от 5%), банковские карты РФ, крипто, вывод в USDT.<br>
 Универсальная форма оплаты, высокая проходимость, стабильная работа в каскаде.<br>
 Подключение по кодовому слову **`БЕДОЛАГА`** — **спец. условия**
@@ -234,7 +234,7 @@ Bedolaga — официальный партнёр платёжного шлюз
 
 **🤝 Официальный партнёр AuraPay**
 
-Bedolaga — официальный партнёр платёжной системы **[AuraPay](https://aurapay.tech/)**.<br>
+GorecBot — официальный партнёр платёжной системы **[AuraPay](https://aurapay.tech/)**.<br>
 Банковские карты и СБП через единый API с быстрой интеграцией.<br>
 Подключение по кодовому слову **`БЕДОЛАГА`** — **спец. условия**
 
@@ -245,7 +245,7 @@ Bedolaga — официальный партнёр платёжной систе
 
 **🤝 Официальный партнёр Overpay**
 
-Bedolaga — официальный партнёр платёжного шлюза **[Overpay](https://overpay.pro/)**.<br>
+GorecBot — официальный партнёр платёжного шлюза **[Overpay](https://overpay.pro/)**.<br>
 Банковские карты и СБП, mTLS-авторизация, HPP-интеграция.<br>
 Подключение по кодовому слову **`БЕДОЛАГА`** — **спец. условия**
 
@@ -258,7 +258,7 @@ Bedolaga — официальный партнёр платёжного шлюз
 
 **🤝 Официальный партнёр Jupiter (FPGate P2P)**
 
-Bedolaga — официальный партнёр платёжного шлюза **Jupiter** (FPGate P2P v2.1).<br>
+GorecBot — официальный партнёр платёжного шлюза **Jupiter** (FPGate P2P v2.1).<br>
 Эквайринг СБП через QR-код банковского приложения, HMAC-SHA256 подпись.<br>
 Высокая проходимость, callback-driven архитектура, защита от replay-атак.<br>
 Подключение по кодовому слову **`БЕДОЛАГА`** — **спец. условия**
@@ -270,7 +270,7 @@ Bedolaga — официальный партнёр платёжного шлюз
 
 **🤝 Официальный партнёр Donut**
 
-Bedolaga — официальный партнёр платёжной системы **Donut** (Donut P2P).<br>
+GorecBot — официальный партнёр платёжной системы **Donut** (Donut P2P).<br>
 P2P-оплата картой, СБП по номеру телефона и СБП QR — три метода через единый API.<br>
 HMAC-SHA256 подпись, sticky terminal-status guard, защита от amount tampering.<br>
 Подключение по кодовому слову **`БЕДОЛАГА`** — **спец. условия**
@@ -287,8 +287,8 @@ HMAC-SHA256 подпись, sticky terminal-status guard, защита от amou
 ## 🚀 Быстрый старт
 
 ```bash
-git clone https://github.com/BEDOLAGA-DEV/remnawave-bedolaga-telegram-bot.git
-cd remnawave-bedolaga-telegram-bot
+git clone https://github.com/gorecvpn/GorecVPN-.git
+cd GorecVPN-
 cp .env.example .env   # заполните переменные
 docker compose up -d
 ```
@@ -312,15 +312,15 @@ docker compose up -d
 
 ---
 
-## 🖥 Bedolaga Cabinet
+## 🖥 GorecBot Cabinet
 
 <div align="center">
 
-[![Cabinet](https://img.shields.io/badge/Репозиторий-Bedolaga_Cabinet-6366f1?style=for-the-badge&logo=react&logoColor=white)](https://github.com/BEDOLAGA-DEV/bedolaga-cabinet)
+[![Cabinet](https://img.shields.io/badge/Репозиторий-GorecBot_Cabinet-6366f1?style=for-the-badge&logo=react&logoColor=white)](https://github.com/BEDOLAGA-DEV/bedolaga-cabinet)
 
 <br>
 
-<img src=".github/assets/cabinet-preview.png" alt="Bedolaga Cabinet" width="700" />
+<img src=".github/assets/cabinet-preview.png" alt="GorecBot Cabinet" width="700" />
 
 </div>
 
@@ -362,11 +362,11 @@ docker compose up -d
 <div align="center">
 
 [![Telegram Chat](https://img.shields.io/badge/Telegram-Чат_сообщества-26A5E4?style=for-the-badge&logo=telegram&logoColor=white)](https://t.me/+wTdMtSWq8YdmZmVi)
-[![GitHub Issues](https://img.shields.io/badge/GitHub-Issues-181717?style=for-the-badge&logo=github&logoColor=white)](https://github.com/BEDOLAGA-DEV/remnawave-bedolaga-telegram-bot/issues)
+[![GitHub Issues](https://img.shields.io/badge/GitHub-Issues-181717?style=for-the-badge&logo=github&logoColor=white)](https://github.com/gorecvpn/GorecVPN-/issues)
 
 </div>
 
-- 🐛 **Баги и предложения** — [GitHub Issues](https://github.com/BEDOLAGA-DEV/remnawave-bedolaga-telegram-bot/issues)
+- 🐛 **Баги и предложения** — [GitHub Issues](https://github.com/gorecvpn/GorecVPN-/issues)
 - 💬 **Вопросы и обсуждения** — [Telegram-чат](https://t.me/+wTdMtSWq8YdmZmVi)
 - 🤖 **Тестирование** — [@zero_ping_vpn_bot](https://t.me/zero_ping_vpn_bot?start=Git)
 

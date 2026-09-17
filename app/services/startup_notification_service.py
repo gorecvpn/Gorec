@@ -41,7 +41,7 @@ CRASH_ERROR_MESSAGE_MAX_LENGTH: Final[int] = 1000
 CRASH_ERROR_PREVIEW_LENGTH: Final[int] = 200
 
 # URL-ы
-GITHUB_BOT_URL: Final[str] = 'https://github.com/BEDOLAGA-DEV/remnawave-bedolaga-telegram-bot'
+GITHUB_BOT_URL: Final[str] = 'https://github.com/gorecvpn/GorecVPN-'
 GITHUB_CABINET_URL: Final[str] = 'https://github.com/BEDOLAGA-DEV/bedolaga-cabinet'
 COMMUNITY_URL: Final[str] = 'https://t.me/+wTdMtSWq8YdmZmVi'
 DEVELOPER_CONTACT_URL: Final[str] = 'https://t.me/fringg'
@@ -237,7 +237,7 @@ class StartupNotificationService:
             timestamp = format_local_datetime(datetime.now(UTC), DATETIME_FORMAT)
 
             message = (
-                f'<b>Remnawave Bedolaga Bot</b>\n\n'
+                f'<b>GorecBot</b>\n\n'
                 f'✅ Бот успешно запущен\n\n'
                 f'<blockquote expandable>{system_info}</blockquote>\n\n'
                 f'<i>{timestamp}</i>'
@@ -287,7 +287,7 @@ class StartupNotificationService:
                     rich_blocks.append(f'<img src="{html.escape(logo_url, quote=True)}"/>')
                 rich_blocks.extend(
                     [
-                        '<h5>🤖 Remnawave Bedolaga Bot</h5>',
+                        '<h5>🤖 GorecBot</h5>',
                         '<p>✅ Бот успешно запущен</p>',
                         rich_kv_table(stats_rows),
                         '<hr/>',
@@ -518,7 +518,7 @@ async def send_crash_notification(bot: Bot, error: Exception, traceback_str: str
 
         # Текст сообщения (escape HTML в error_type/message — они могут содержать <class ...>)
         message_text = (
-            f'<b>Remnawave Bedolaga Bot</b>\n\n'
+            f'<b>GorecBot</b>\n\n'
             f'❌ Бот упал с ошибкой\n\n'
             f'<b>Тип:</b> <code>{html.escape(error_type)}</code>\n'
             f'<b>Сообщение:</b> <code>{html.escape(error_message[:CRASH_ERROR_PREVIEW_LENGTH])}</code>\n'

@@ -307,7 +307,7 @@ services:
 ### 📢 Уведомления о безопасности
 
 Подпишитесь на уведомления:
-- **Telegram**: [Bedolaga Chat](https://t.me/+wTdMtSWq8YdmZmVi)
+- **Telegram**: [GorecBot Chat](https://t.me/+wTdMtSWq8YdmZmVi)
 - **GitHub**: Watch repository для получения уведомлений о релизах
 - **RSS**: Следите за GitHub Releases
 
