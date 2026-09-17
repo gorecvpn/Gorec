@@ -13,6 +13,7 @@ from app.database.crud import raffle as raffle_crud
 from app.database.models import RaffleCampaignStatus, RafflePrizeType, RaffleWinner, User
 from app.services.raffle.service import (
     DRAW_ALGORITHM,
+    _normalize_image_url,
     _normalize_prize_slots,
     _normalize_tickets_by_tariff,
     draw_winners,
@@ -33,6 +34,7 @@ class PrizeSlotInput(BaseModel):
     prize_type: str = Field(RafflePrizeType.CUSTOM.value)
     prize_value: int | None = None
     prize_text: str | None = None
+    image_url: str | None = None
 
 
 class AdminRaffleCampaignItem(BaseModel):
@@ -80,6 +82,23 @@ class CreateRaffleCampaignRequest(BaseModel):
     ends_at: datetime | None = None
 
 
+class UpdateRaffleCampaignRequest(BaseModel):
+    """Patch campaign. Active: ends_at + prize_slots (+ name/description). Drawn: forbidden."""
+
+    name: str | None = Field(None, min_length=1, max_length=200)
+    description: str | None = None
+    ends_at: datetime | None = None
+    clear_ends_at: bool = False
+    prize_type: str | None = None
+    prize_value: int | None = None
+    prize_text: str | None = None
+    prize_slots: list[PrizeSlotInput] | None = None
+    tickets_per_purchase: int | None = Field(None, ge=1, le=50)
+    tickets_by_tariff: dict[str, int] | None = None
+    skip_trial_purchases: bool | None = None
+    starts_at: datetime | None = None
+
+
 class AdminRaffleWinnerItem(BaseModel):
     id: int
     campaign_id: int
@@ -113,6 +132,31 @@ class AdminRaffleCampaignDetailResponse(BaseModel):
     campaign: AdminRaffleCampaignItem
     winners: list[AdminRaffleWinnerItem]
 
+
+
+def _slots_from_request(slots: list[PrizeSlotInput] | None) -> list[dict[str, Any]] | None:
+    if slots is None:
+        return None
+    slots_raw = []
+    for slot in slots:
+        ptype = _validate_prize(slot.prize_type, slot.prize_value, slot.prize_text)
+        try:
+            image_url = _normalize_image_url(slot.image_url, strict=True)
+        except ValueError as exc:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+        item: dict[str, Any] = {
+            'place': slot.place,
+            'prize_type': ptype,
+            'prize_value': slot.prize_value,
+            'prize_text': slot.prize_text,
+        }
+        if image_url is not None:
+            item['image_url'] = image_url
+        slots_raw.append(item)
+    normalized = _normalize_prize_slots(slots_raw, strict_images=True)
+    if not normalized:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail='Invalid prize_slots')
+    return normalized
 
 def _validate_prize(prize_type: str, prize_value: int | None, prize_text: str | None) -> str:
     prize_type = (prize_type or RafflePrizeType.CUSTOM.value).lower()
@@ -240,20 +284,7 @@ async def create_raffle_campaign(
 ):
     slots_raw = None
     if request.prize_slots:
-        slots_raw = []
-        for slot in request.prize_slots:
-            ptype = _validate_prize(slot.prize_type, slot.prize_value, slot.prize_text)
-            slots_raw.append(
-                {
-                    'place': slot.place,
-                    'prize_type': ptype,
-                    'prize_value': slot.prize_value,
-                    'prize_text': slot.prize_text,
-                }
-            )
-        slots_raw = _normalize_prize_slots(slots_raw)
-        if not slots_raw:
-            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail='Invalid prize_slots')
+        slots_raw = _slots_from_request(request.prize_slots)
         # Default campaign prize = 1st place for backward-compatible fields
         first = slots_raw[0]
         prize_type = first['prize_type']
@@ -378,3 +409,145 @@ async def award_raffle_winner(
         admin_id=admin.id,
     )
     return _winner_item(winner)
+
+
+@router.patch('/campaigns/{campaign_id}', response_model=AdminRaffleCampaignItem)
+async def update_raffle_campaign(
+    campaign_id: int,
+    request: UpdateRaffleCampaignRequest,
+    admin: User = Depends(require_permission('raffle:edit')),
+    db: AsyncSession = Depends(get_cabinet_db),
+):
+    """Edit campaign. Active/draft: ends_at and prize places; drawn — forbidden; closed — limited."""
+    campaign = await raffle_crud.get_campaign_by_id(db, campaign_id)
+    if not campaign:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail='Campaign not found')
+
+    status_value = (campaign.status or '').lower()
+    if status_value == RaffleCampaignStatus.DRAWN.value:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail='Cannot edit a drawn campaign',
+        )
+
+    # Active: allow ends_at + prizes (+ cosmetic name/description). No starts_at / ticket rules.
+    # Closed: allow cosmetic + ends_at + prizes (re-open via activate separately). No auto-draw.
+    # Draft: full editable set.
+    provided = request.model_fields_set
+
+    slots_raw = ...
+    if 'prize_slots' in provided:
+        if request.prize_slots is None:
+            slots_raw = None
+        else:
+            slots_raw = _slots_from_request(request.prize_slots)
+
+    prize_type = None
+    prize_value = ...
+    prize_text = ...
+    max_winners = None
+    if slots_raw is not ... and slots_raw is not None:
+        first = slots_raw[0]
+        prize_type = first['prize_type']
+        prize_value = first.get('prize_value')
+        prize_text = first.get('prize_text')
+        max_winners = len(slots_raw)
+    elif status_value == RaffleCampaignStatus.DRAFT.value:
+        if 'prize_type' in provided or 'prize_value' in provided or 'prize_text' in provided:
+            ptype = request.prize_type if 'prize_type' in provided else campaign.prize_type
+            pval = request.prize_value if 'prize_value' in provided else campaign.prize_value
+            ptext = request.prize_text if 'prize_text' in provided else campaign.prize_text
+            prize_type = _validate_prize(ptype or RafflePrizeType.CUSTOM.value, pval, ptext)
+            prize_value = pval if 'prize_value' in provided else ...
+            prize_text = ptext if 'prize_text' in provided else ...
+
+    ends_at = ...
+    if request.clear_ends_at:
+        ends_at = None
+    elif 'ends_at' in provided:
+        ends_at = request.ends_at
+
+    name = request.name.strip() if request.name is not None else None
+    description = ...
+    if 'description' in provided:
+        description = request.description
+
+    starts_at = ...
+    tickets_per_purchase = None
+    tickets_by_tariff = ...
+    skip_trial = None
+
+    if status_value == RaffleCampaignStatus.DRAFT.value:
+        if 'starts_at' in provided and request.starts_at is not None:
+            starts_at = request.starts_at
+        if request.tickets_per_purchase is not None:
+            tickets_per_purchase = request.tickets_per_purchase
+        if 'tickets_by_tariff' in provided:
+            tickets_by_tariff = _normalize_tickets_by_tariff(request.tickets_by_tariff)
+        if request.skip_trial_purchases is not None:
+            skip_trial = request.skip_trial_purchases
+    elif status_value in {
+        RaffleCampaignStatus.ACTIVE.value,
+        RaffleCampaignStatus.CLOSED.value,
+    }:
+        # Disallow changing ticket issuance rules on live/closed campaigns
+        if any(
+            k in provided
+            for k in ('tickets_per_purchase', 'tickets_by_tariff', 'skip_trial_purchases', 'starts_at')
+        ):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail='Cannot change ticket rules or starts_at on active/closed campaigns',
+            )
+    else:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail='Cannot edit campaign in this status')
+
+    campaign = await raffle_crud.update_campaign(
+        db,
+        campaign,
+        name=name,
+        description=description,
+        starts_at=starts_at,
+        ends_at=ends_at,
+        max_winners=max_winners,
+        prize_type=prize_type,
+        prize_value=prize_value,
+        prize_text=prize_text,
+        prize_slots=slots_raw,
+        tickets_per_purchase=tickets_per_purchase,
+        tickets_by_tariff=tickets_by_tariff,
+        skip_trial_purchases=skip_trial,
+    )
+    stats = await raffle_crud.get_campaign_ticket_stats(db, campaign.id)
+    logger.info('Admin updated raffle campaign', campaign_id=campaign.id, admin_id=admin.id)
+    return _campaign_item(campaign, stats)
+
+
+@router.delete('/campaigns/{campaign_id}', status_code=status.HTTP_204_NO_CONTENT)
+async def delete_raffle_campaign(
+    campaign_id: int,
+    force: bool = Query(False, description='Allow delete of active campaign'),
+    admin: User = Depends(require_permission('raffle:edit')),
+    db: AsyncSession = Depends(get_cabinet_db),
+):
+    """Delete finished/closed/drawn (or draft) campaigns. Active requires force=true."""
+    campaign = await raffle_crud.get_campaign_by_id(db, campaign_id)
+    if not campaign:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail='Campaign not found')
+
+    status_value = (campaign.status or '').lower()
+    if status_value == RaffleCampaignStatus.ACTIVE.value and not force:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail='Cannot delete an active campaign without force=true',
+        )
+
+    await raffle_crud.delete_campaign(db, campaign)
+    logger.info(
+        'Admin deleted raffle campaign',
+        campaign_id=campaign_id,
+        status=status_value,
+        force=force,
+        admin_id=admin.id,
+    )
+    return None

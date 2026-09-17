@@ -5257,7 +5257,7 @@ class RaffleCampaign(Base):
     prize_type = Column(String(20), nullable=False, default=RafflePrizeType.CUSTOM.value)
     prize_value = Column(Integer, nullable=True)  # дни или копейки
     prize_text = Column(Text, nullable=True)
-    # Optional ordered place prizes: [{place, prize_type, prize_value, prize_text}, ...]
+    # Optional ordered place prizes: [{place, prize_type, prize_value, prize_text, image_url?}, ...]
     prize_slots = Column(JSON, nullable=True)
     tickets_per_purchase = Column(Integer, nullable=False, default=1)
     # {"tariff_id": tickets_count} — overrides tickets_per_purchase when mapped

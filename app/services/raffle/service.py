@@ -37,7 +37,23 @@ def _make_ticket_code() -> str:
     return f'RAFFLE_{secrets.token_hex(4).upper()}'
 
 
-def _normalize_prize_slots(raw: Any) -> list[dict[str, Any]]:
+def _normalize_image_url(raw: Any, *, strict: bool = False) -> str | None:
+    """Optional prize image: absolute https URL or site-relative path."""
+    if raw is None:
+        return None
+    value = str(raw).strip()
+    if not value:
+        return None
+    if value.startswith('https://'):
+        return value
+    if value.startswith('/') and not value.startswith('//'):
+        return value
+    if strict:
+        raise ValueError('image_url must be an https:// URL or a path starting with /')
+    return None
+
+
+def _normalize_prize_slots(raw: Any, *, strict_images: bool = False) -> list[dict[str, Any]]:
     if not isinstance(raw, list):
         return []
     slots: list[dict[str, Any]] = []
@@ -46,14 +62,16 @@ def _normalize_prize_slots(raw: Any) -> list[dict[str, Any]]:
             continue
         place = int(item.get('place') or (idx + 1))
         prize_type = str(item.get('prize_type') or RafflePrizeType.CUSTOM.value).lower()
-        slots.append(
-            {
-                'place': place,
-                'prize_type': prize_type,
-                'prize_value': item.get('prize_value'),
-                'prize_text': item.get('prize_text'),
-            }
-        )
+        image_url = _normalize_image_url(item.get('image_url'), strict=strict_images)
+        slot = {
+            'place': place,
+            'prize_type': prize_type,
+            'prize_value': item.get('prize_value'),
+            'prize_text': item.get('prize_text'),
+        }
+        if image_url is not None:
+            slot['image_url'] = image_url
+        slots.append(slot)
     slots.sort(key=lambda s: s['place'])
     return slots
 
