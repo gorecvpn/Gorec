@@ -5257,6 +5257,15 @@ class RaffleCampaign(Base):
     prize_type = Column(String(20), nullable=False, default=RafflePrizeType.CUSTOM.value)
     prize_value = Column(Integer, nullable=True)  # дни или копейки
     prize_text = Column(Text, nullable=True)
+    # Optional ordered place prizes: [{place, prize_type, prize_value, prize_text}, ...]
+    prize_slots = Column(JSON, nullable=True)
+    tickets_per_purchase = Column(Integer, nullable=False, default=1)
+    # {"tariff_id": tickets_count} — overrides tickets_per_purchase when mapped
+    tickets_by_tariff = Column(JSON, nullable=True)
+    skip_trial_purchases = Column(Boolean, nullable=False, default=True)
+    draw_seed = Column(String(64), nullable=True)
+    draw_algorithm = Column(String(64), nullable=True)
+    drawn_at = Column(AwareDateTime(), nullable=True)
     created_at = Column(AwareDateTime(), default=func.now())
     updated_at = Column(AwareDateTime(), default=func.now(), onupdate=func.now())
 
@@ -5268,11 +5277,16 @@ class RaffleCampaign(Base):
 
 
 class RaffleTicket(Base):
-    """Билет розыгрыша, выданный за одну оплаченную транзакцию подписки."""
+    """Билет розыгрыша, выданный за оплаченную транзакцию подписки (возможен индекс 0..N-1)."""
 
     __tablename__ = 'raffle_tickets'
     __table_args__ = (
-        UniqueConstraint('campaign_id', 'source_transaction_id', name='uq_raffle_tickets_campaign_tx'),
+        UniqueConstraint(
+            'campaign_id',
+            'source_transaction_id',
+            'ticket_index',
+            name='uq_raffle_tickets_campaign_tx_idx',
+        ),
         Index('ix_raffle_tickets_campaign_user', 'campaign_id', 'user_id'),
     )
 
@@ -5281,6 +5295,7 @@ class RaffleTicket(Base):
     user_id = Column(Integer, ForeignKey('users.id', ondelete='CASCADE'), nullable=False, index=True)
     ticket_code = Column(String(64), nullable=False, unique=True, index=True)
     source_transaction_id = Column(Integer, nullable=False)
+    ticket_index = Column(Integer, nullable=False, default=0)
     tariff_id = Column(Integer, ForeignKey('tariffs.id', ondelete='SET NULL'), nullable=True)
     created_at = Column(AwareDateTime(), default=func.now())
 

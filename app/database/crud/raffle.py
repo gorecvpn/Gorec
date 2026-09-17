@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from typing import Any
 
 import structlog
 from sqlalchemy import and_, func, select
@@ -32,17 +33,30 @@ async def create_campaign(
     prize_type: str = 'custom',
     prize_value: int | None = None,
     prize_text: str | None = None,
+    prize_slots: list[dict[str, Any]] | None = None,
+    tickets_per_purchase: int = 1,
+    tickets_by_tariff: dict | None = None,
+    skip_trial_purchases: bool = True,
 ) -> RaffleCampaign:
+    slots = prize_slots or None
+    winners = max(1, int(max_winners or 1))
+    if slots:
+        winners = max(winners, len(slots))
+
     campaign = RaffleCampaign(
         name=name,
         description=description,
         status=status,
         starts_at=starts_at or datetime.now(UTC),
         ends_at=ends_at,
-        max_winners=max(1, int(max_winners or 1)),
+        max_winners=winners,
         prize_type=prize_type,
         prize_value=prize_value,
         prize_text=prize_text,
+        prize_slots=slots,
+        tickets_per_purchase=max(1, min(50, int(tickets_per_purchase or 1))),
+        tickets_by_tariff=tickets_by_tariff or None,
+        skip_trial_purchases=bool(skip_trial_purchases),
     )
     db.add(campaign)
     await db.commit()
@@ -89,16 +103,36 @@ async def get_current_active_campaign(db: AsyncSession) -> RaffleCampaign | None
     return result.scalar_one_or_none()
 
 
+
+
 async def get_ticket_by_campaign_tx(
     db: AsyncSession, campaign_id: int, source_transaction_id: int
 ) -> RaffleTicket | None:
+    """Any ticket for this purchase (idempotency check)."""
     result = await db.execute(
-        select(RaffleTicket).where(
+        select(RaffleTicket)
+        .where(
             RaffleTicket.campaign_id == campaign_id,
             RaffleTicket.source_transaction_id == source_transaction_id,
         )
+        .order_by(RaffleTicket.ticket_index.asc())
+        .limit(1)
     )
     return result.scalar_one_or_none()
+
+
+async def list_tickets_by_campaign_tx(
+    db: AsyncSession, campaign_id: int, source_transaction_id: int
+) -> list[RaffleTicket]:
+    result = await db.execute(
+        select(RaffleTicket)
+        .where(
+            RaffleTicket.campaign_id == campaign_id,
+            RaffleTicket.source_transaction_id == source_transaction_id,
+        )
+        .order_by(RaffleTicket.ticket_index.asc())
+    )
+    return list(result.scalars().all())
 
 
 async def create_ticket(
@@ -109,6 +143,7 @@ async def create_ticket(
     ticket_code: str,
     source_transaction_id: int,
     tariff_id: int | None = None,
+    ticket_index: int = 0,
     commit: bool = True,
 ) -> RaffleTicket:
     ticket = RaffleTicket(
@@ -116,6 +151,7 @@ async def create_ticket(
         user_id=user_id,
         ticket_code=ticket_code,
         source_transaction_id=source_transaction_id,
+        ticket_index=int(ticket_index or 0),
         tariff_id=tariff_id,
     )
     db.add(ticket)
@@ -159,6 +195,15 @@ async def list_winners(db: AsyncSession, campaign_id: int) -> list[RaffleWinner]
         .order_by(RaffleWinner.place.asc())
     )
     return list(result.scalars().all())
+
+
+async def get_winner_by_id(db: AsyncSession, winner_id: int) -> RaffleWinner | None:
+    result = await db.execute(
+        select(RaffleWinner)
+        .options(selectinload(RaffleWinner.user), selectinload(RaffleWinner.campaign))
+        .where(RaffleWinner.id == winner_id)
+    )
+    return result.scalar_one_or_none()
 
 
 async def create_winner(

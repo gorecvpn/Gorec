@@ -1,6 +1,7 @@
 """Raffle tickets routes for cabinet — active campaign summary and user's tickets."""
 
 from datetime import datetime
+from typing import Any
 
 import structlog
 from fastapi import APIRouter, Depends
@@ -10,6 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.config import settings
 from app.database.crud import raffle as raffle_crud
 from app.database.models import User
+from app.services.raffle.service import _normalize_prize_slots, max_winners_for_campaign
 
 from ..dependencies import get_cabinet_db, get_current_cabinet_user
 
@@ -26,10 +28,15 @@ class RaffleCampaignSummary(BaseModel):
     prize_type: str
     prize_value: int | None = None
     prize_text: str | None = None
+    prize_slots: list[dict[str, Any]] | None = None
     starts_at: datetime
     ends_at: datetime | None = None
     status: str
     max_winners: int
+    tickets_per_purchase: int = 1
+    tickets_by_tariff: dict[str, int] | None = None
+    pool_tickets: int = 0
+    pool_users: int = 0
 
 
 class RaffleTicketItem(BaseModel):
@@ -63,6 +70,7 @@ async def get_raffle_summary(
         return RaffleSummaryResponse(enabled=True, campaign=None, tickets=[], ticket_count=0)
 
     tickets = await raffle_crud.list_tickets_for_user(db, user.id, campaign_id=campaign.id)
+    stats = await raffle_crud.get_campaign_ticket_stats(db, campaign.id)
     return RaffleSummaryResponse(
         enabled=True,
         campaign=RaffleCampaignSummary(
@@ -72,10 +80,15 @@ async def get_raffle_summary(
             prize_type=campaign.prize_type,
             prize_value=campaign.prize_value,
             prize_text=campaign.prize_text,
+            prize_slots=_normalize_prize_slots(getattr(campaign, 'prize_slots', None)) or None,
             starts_at=campaign.starts_at,
             ends_at=campaign.ends_at,
             status=campaign.status,
-            max_winners=campaign.max_winners,
+            max_winners=max_winners_for_campaign(campaign),
+            tickets_per_purchase=int(getattr(campaign, 'tickets_per_purchase', 1) or 1),
+            tickets_by_tariff=getattr(campaign, 'tickets_by_tariff', None),
+            pool_tickets=stats.get('tickets', 0),
+            pool_users=stats.get('unique_users', 0),
         ),
         tickets=[
             RaffleTicketItem(

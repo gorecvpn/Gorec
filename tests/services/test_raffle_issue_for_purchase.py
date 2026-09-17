@@ -19,6 +19,7 @@ def _stub_db() -> SimpleNamespace:
     db.flush = AsyncMock()
     db.refresh = AsyncMock()
     db.rollback = AsyncMock()
+    db.get = AsyncMock(return_value=None)
 
     @asynccontextmanager
     async def _begin_nested():
@@ -51,43 +52,49 @@ def active_campaign():
         prize_type='custom',
         prize_value=None,
         prize_text='Prize',
+        prize_slots=None,
+        tickets_per_purchase=1,
+        skip_trial_purchases=True,
     )
 
 
-async def test_issue_for_purchase_disabled_returns_none(monkeypatch):
+async def test_issue_for_purchase_disabled_returns_empty(monkeypatch):
     _patch_settings(monkeypatch, enabled=False)
     result = await raffle_service.issue_for_purchase(_stub_db(), user_id=1, transaction_id=100)
-    assert result is None
+    assert result == []
 
 
-async def test_issue_for_purchase_no_campaign_returns_none(raffle_enabled, monkeypatch):
+async def test_issue_for_purchase_no_campaign_returns_empty(raffle_enabled, monkeypatch):
     monkeypatch.setattr(
         raffle_service.raffle_crud,
         'get_current_active_campaign',
         AsyncMock(return_value=None),
     )
     result = await raffle_service.issue_for_purchase(_stub_db(), user_id=1, transaction_id=100)
-    assert result is None
+    assert result == []
 
 
 async def test_issue_for_purchase_idempotent(raffle_enabled, active_campaign, monkeypatch):
-    existing = SimpleNamespace(
-        id=1,
-        campaign_id=7,
-        user_id=42,
-        ticket_code='RAFFLE_AAAA',
-        source_transaction_id=555,
-    )
+    existing = [
+        SimpleNamespace(
+            id=1,
+            campaign_id=7,
+            user_id=42,
+            ticket_code='RAFFLE_AAAA',
+            source_transaction_id=555,
+            ticket_index=0,
+        )
+    ]
     monkeypatch.setattr(
         raffle_service.raffle_crud,
         'get_current_active_campaign',
         AsyncMock(return_value=active_campaign),
     )
-    get_ticket = AsyncMock(return_value=existing)
+    list_tickets = AsyncMock(return_value=existing)
     monkeypatch.setattr(
         raffle_service.raffle_crud,
-        'get_ticket_by_campaign_tx',
-        get_ticket,
+        'list_tickets_by_campaign_tx',
+        list_tickets,
     )
     create_ticket = AsyncMock()
     monkeypatch.setattr(
@@ -102,7 +109,7 @@ async def test_issue_for_purchase_idempotent(raffle_enabled, active_campaign, mo
     assert first is existing
     assert second is existing
     create_ticket.assert_not_called()
-    assert get_ticket.await_count == 2
+    assert list_tickets.await_count == 2
 
 
 async def test_issue_for_purchase_creates_once(raffle_enabled, active_campaign, monkeypatch):
@@ -112,6 +119,7 @@ async def test_issue_for_purchase_creates_once(raffle_enabled, active_campaign, 
         user_id=42,
         ticket_code='RAFFLE_BBBB',
         source_transaction_id=777,
+        ticket_index=0,
     )
     monkeypatch.setattr(
         raffle_service.raffle_crud,
@@ -120,8 +128,8 @@ async def test_issue_for_purchase_creates_once(raffle_enabled, active_campaign, 
     )
     monkeypatch.setattr(
         raffle_service.raffle_crud,
-        'get_ticket_by_campaign_tx',
-        AsyncMock(return_value=None),
+        'list_tickets_by_campaign_tx',
+        AsyncMock(return_value=[]),
     )
     monkeypatch.setattr(
         raffle_service.raffle_crud,
@@ -137,4 +145,65 @@ async def test_issue_for_purchase_creates_once(raffle_enabled, active_campaign, 
     result = await raffle_service.issue_for_purchase(
         _stub_db(), user_id=42, transaction_id=777, tariff_id=3
     )
-    assert result is created
+    assert result == [created]
+
+
+async def test_issue_skips_trial_when_flag_set(raffle_enabled, active_campaign, monkeypatch):
+    active_campaign.skip_trial_purchases = True
+    monkeypatch.setattr(
+        raffle_service.raffle_crud,
+        'get_current_active_campaign',
+        AsyncMock(return_value=active_campaign),
+    )
+    monkeypatch.setattr(
+        raffle_service.raffle_crud,
+        'list_tickets_by_campaign_tx',
+        AsyncMock(return_value=[]),
+    )
+    create_ticket = AsyncMock()
+    monkeypatch.setattr(raffle_service.raffle_crud, 'create_ticket', create_ticket)
+
+    db = _stub_db()
+    db.get = AsyncMock(
+        return_value=SimpleNamespace(
+            amount_kopeks=0,
+            description='trial activation',
+            external_id='trial_1',
+            payment_method='trial',
+        )
+    )
+    result = await raffle_service.issue_for_purchase(db, user_id=42, transaction_id=1)
+    assert result == []
+    create_ticket.assert_not_called()
+
+
+async def test_issue_uses_tickets_by_tariff(raffle_enabled, active_campaign, monkeypatch):
+    active_campaign.tickets_per_purchase = 1
+    active_campaign.tickets_by_tariff = {'3': 3}
+    created_calls = []
+
+    async def _create(db, **kwargs):
+        ticket = SimpleNamespace(id=len(created_calls) + 1, **kwargs)
+        if not getattr(ticket, 'ticket_code', None):
+            ticket.ticket_code = f'T{len(created_calls)}'
+        created_calls.append(ticket)
+        return ticket
+
+    monkeypatch.setattr(
+        raffle_service.raffle_crud,
+        'get_current_active_campaign',
+        AsyncMock(return_value=active_campaign),
+    )
+    monkeypatch.setattr(
+        raffle_service.raffle_crud,
+        'list_tickets_by_campaign_tx',
+        AsyncMock(return_value=[]),
+    )
+    monkeypatch.setattr(raffle_service.raffle_crud, 'create_ticket', AsyncMock(side_effect=_create))
+    monkeypatch.setattr(raffle_service, '_notify_user_ticket', AsyncMock(return_value=None))
+
+    result = await raffle_service.issue_for_purchase(
+        _stub_db(), user_id=42, transaction_id=900, tariff_id=3
+    )
+    assert len(result) == 3
+    assert [t.ticket_index for t in result] == [0, 1, 2]
