@@ -195,3 +195,19 @@ async def create_winner(
         await db.flush()
     await db.refresh(winner)
     return winner
+
+
+async def list_tickets_for_user(
+    db: AsyncSession,
+    user_id: int,
+    *,
+    campaign_id: int | None = None,
+    limit: int = 100,
+) -> list[RaffleTicket]:
+    """Билеты пользователя, опционально в рамках одной кампании (новые сверху)."""
+    stmt = select(RaffleTicket).where(RaffleTicket.user_id == user_id)
+    if campaign_id is not None:
+        stmt = stmt.where(RaffleTicket.campaign_id == campaign_id)
+    stmt = stmt.order_by(RaffleTicket.created_at.desc()).limit(limit)
+    result = await db.execute(stmt)
+    return list(result.scalars().all())
