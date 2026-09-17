@@ -1128,6 +1128,12 @@ async def purchase_tariff(
                 await decrement_subscription_server_counts(db, trial_sub)
             except Exception as trial_err:
                 logger.warning('Failed to disable trial on RemnaWave', error=trial_err, trial_id=trial_sub.id)
+        # Capture scalar ids before the RemnaWave call: a panel timeout can leave
+        # the AsyncSession / ORM instances in a state where lazy-loading
+        # subscription.id / user.id raises MissingGreenlet and turns a deferred
+        # sync into a hard 500 after money was already charged.
+        _sync_subscription_id = int(subscription.id)
+        _sync_user_id = int(user.id)
         try:
             # Mirror the bot handler logic: in single-tariff mode, check user.remnawave_id
             # (webhook clears it on panel deletion), not subscription.remnawave_id
@@ -1156,14 +1162,36 @@ async def purchase_tariff(
                         reset_reason='покупка тарифа (cabinet)',
                     )
         except Exception as remnawave_error:
-            logger.error('Failed to sync subscription with RemnaWave', remnawave_error=remnawave_error)
+            logger.error(
+                'Failed to sync subscription with RemnaWave',
+                remnawave_error=remnawave_error,
+                subscription_id=_sync_subscription_id,
+                user_id=_sync_user_id,
+            )
             from app.services.remnawave_retry_queue import remnawave_retry_queue
 
             remnawave_retry_queue.enqueue(
-                subscription_id=subscription.id,
-                user_id=user.id,
+                subscription_id=_sync_subscription_id,
+                user_id=_sync_user_id,
                 action='create' if _should_create else 'update',
             )
+            # Re-bind ORM instances after a cancelled remnawave call so later
+            # refresh()/attribute access does not trip MissingGreenlet.
+            try:
+                await db.rollback()
+            except Exception:
+                pass
+            try:
+                await db.refresh(user)
+                await db.refresh(subscription)
+                await db.refresh(subscription, ['tariff'])
+            except Exception as refresh_err:
+                logger.warning(
+                    'Failed to refresh user/subscription after RemnaWave timeout',
+                    error=refresh_err,
+                    user_id=_sync_user_id,
+                    subscription_id=_sync_subscription_id,
+                )
 
         # Save cart for auto-renewal (not for daily tariffs - they have their own charging)
         if not is_daily_tariff:
@@ -1295,7 +1323,12 @@ async def purchase_tariff(
     except HTTPException:
         raise
     except Exception as e:
-        logger.error('Failed to purchase tariff for user', user_id=user.id, error=e)
+        _err_user_id = None
+        try:
+            _err_user_id = int(getattr(user, 'id', None) or 0) or None
+        except Exception:
+            _err_user_id = locals().get('_sync_user_id')
+        logger.error('Failed to purchase tariff for user', user_id=_err_user_id, error=e)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail='Failed to process tariff purchase',
