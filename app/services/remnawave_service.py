@@ -1,0 +1,3547 @@
+import asyncio
+import re
+from contextlib import AsyncExitStack, asynccontextmanager
+from dataclasses import asdict, is_dataclass
+from datetime import UTC, datetime, timedelta
+from typing import Any, Optional
+from zoneinfo import ZoneInfo
+
+import structlog
+from sqlalchemy import String, and_, cast, delete, func, select, update
+from sqlalchemy.exc import IntegrityError
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
+
+from app.config import settings
+from app.database.crud.server_squad import get_server_squad_by_uuid
+from app.database.crud.subscription import (
+    decrement_subscription_server_counts,
+)
+from app.database.crud.user import (
+    create_user_no_commit,
+    get_user_by_telegram_id,
+)
+from app.database.models import (
+    ServerSquad,
+    Subscription,
+    SubscriptionServer,
+    SubscriptionStatus,
+    User,
+)
+from app.external.remnawave_api import (
+    RemnaWaveAPI,
+    RemnaWaveAPIError,
+    RemnaWaveInvalidUserIdError,
+    coerce_panel_user_id,
+)
+from app.services.panel_sync import (
+    BULK_SNAPSHOT,
+    link_subscription_panel_identity,
+    project_onto_subscription,
+    push_all_subscriptions,
+    read_panel_user,
+)
+from app.services.panel_sync.db_session import release_transaction, rollback_quietly
+from app.utils.subscription_utils import (
+    coerce_panel_device_limit,
+    device_limit_needs_heal,
+)
+from app.utils.timezone import get_local_timezone
+
+
+logger = structlog.get_logger(__name__)
+
+
+def _get_user_traffic_bytes(panel_user: dict[str, Any]) -> int:
+    """Извлекает usedTrafficBytes из панельного пользователя (совместимо с новым и старым API)"""
+    # Новый формат: userTraffic.usedTrafficBytes
+    user_traffic = panel_user.get('userTraffic')
+    if user_traffic and isinstance(user_traffic, dict):
+        return user_traffic.get('usedTrafficBytes', 0)
+    # Старый формат: usedTrafficBytes напрямую
+    return panel_user.get('usedTrafficBytes', 0)
+
+
+_PANEL_ID_MAP_MISSING = object()
+_ATTR_NOT_CAPTURED = object()
+
+
+def _normalize_panel_user_id(value: Any) -> int | None:
+    """Приводит идентификатор панельного пользователя к int или None.
+
+    В 3.0.0 запись панели идентифицируется только числовым id. БД отдаёт
+    BigInteger, но JSON/FSM могут донести цифровую строку, а сравнение int со
+    str всегда False — на синке это переписывало бы идентичность каждому
+    пользователю на каждом проходе. Здесь мусорный идентификатор не ошибка, а
+    «идентичности нет»: сравнивать и матчить по нему нельзя.
+    """
+    try:
+        return coerce_panel_user_id(value)
+    except RemnaWaveInvalidUserIdError:
+        return None
+
+
+class _PanelIdMapMutation:
+    """Tracks in-memory panel-id map/user changes so they can be rolled back."""
+
+    __slots__ = ('_map_original', '_user_original', 'id_map')
+
+    def __init__(self, id_map: dict[int, 'User']):
+        self.id_map = id_map
+        self._map_original: dict[int, Any] = {}
+        self._user_original: dict[User, tuple[Any, Any]] = {}
+
+    def _capture_user_state(self, user: Optional['User']) -> None:
+        if not user or user in self._user_original:
+            return
+        # В async-контексте ORM-атрибуты могут быть expired (например после
+        # SAVEPOINT rollback). getattr не спасает — SQLAlchemy бросает
+        # MissingGreenlet, а не AttributeError. Ловим и помечаем sentinel'ом.
+        try:
+            panel_id_val = getattr(user, 'remnawave_id', None)
+        except Exception:
+            panel_id_val = _ATTR_NOT_CAPTURED
+        try:
+            updated_val = getattr(user, 'updated_at', None)
+        except Exception:
+            updated_val = _ATTR_NOT_CAPTURED
+        self._user_original[user] = (panel_id_val, updated_val)
+
+    def _capture_map_entry(self, key: int | None) -> None:
+        if key is None or key in self._map_original:
+            return
+        self._map_original[key] = self.id_map.get(key, _PANEL_ID_MAP_MISSING)
+
+    def set_user_panel_id(self, user: Optional['User'], value: int | None) -> None:
+        if not user:
+            return
+        self._capture_user_state(user)
+        user.remnawave_id = value
+
+    def set_user_updated_at(self, user: Optional['User'], value: datetime) -> None:
+        if not user:
+            return
+        self._capture_user_state(user)
+        user.updated_at = value
+
+    def remove_map_entry(self, key: int | None) -> None:
+        if key is None:
+            return
+        self._capture_map_entry(key)
+        self.id_map.pop(key, None)
+
+    def set_map_entry(self, key: int | None, value: Optional['User']) -> None:
+        if key is None:
+            return
+        self._capture_map_entry(key)
+        if value is None:
+            self.id_map.pop(key, None)
+        else:
+            self.id_map[key] = value
+
+    def has_changes(self) -> bool:
+        return bool(self._map_original or self._user_original)
+
+    def rollback(self) -> None:
+        for user, (panel_id_value, updated_at) in self._user_original.items():
+            if panel_id_value is not _ATTR_NOT_CAPTURED:
+                user.remnawave_id = panel_id_value
+            if updated_at is not _ATTR_NOT_CAPTURED:
+                user.updated_at = updated_at
+
+        for key, original in self._map_original.items():
+            if original is _PANEL_ID_MAP_MISSING:
+                self.id_map.pop(key, None)
+            else:
+                self.id_map[key] = original
+
+
+class RemnaWaveConfigurationError(Exception):
+    """Raised when RemnaWave API configuration is missing."""
+
+
+class RemnaWaveService:
+    def __init__(self):
+        auth_params = settings.get_remnawave_auth_params()
+        base_url = (auth_params.get('base_url') or '').strip()
+        api_key = (auth_params.get('api_key') or '').strip()
+
+        self._config_error: str | None = None
+
+        self._panel_timezone = get_local_timezone()
+        self._utc_timezone = ZoneInfo('UTC')
+
+        if not base_url:
+            self._config_error = 'REMNAWAVE_API_URL не настроен'
+        elif not api_key:
+            self._config_error = 'REMNAWAVE_API_KEY не настроен'
+
+        # Сохраняем параметры для создания новых экземпляров API клиента
+        # (каждый вызов get_api_client создаёт свой экземпляр, чтобы
+        # параллельные корутины не перезаписывали друг другу aiohttp-сессию)
+        self._api_kwargs: dict | None = None
+        if not self._config_error:
+            self._api_kwargs = {
+                'base_url': base_url,
+                'api_key': api_key,
+                'secret_key': auth_params.get('secret_key'),
+                'username': auth_params.get('username'),
+                'password': auth_params.get('password'),
+                'caddy_token': auth_params.get('caddy_token'),
+                'auth_type': auth_params.get('auth_type') or 'api_key',
+            }
+
+    @property
+    def is_configured(self) -> bool:
+        return self._config_error is None
+
+    @property
+    def configuration_error(self) -> str | None:
+        return self._config_error
+
+    def _ensure_configured(self) -> None:
+        if not self.is_configured or self._api_kwargs is None:
+            raise RemnaWaveConfigurationError(self._config_error or 'RemnaWave API не настроен')
+
+    def _ensure_user_remnawave_id(
+        self,
+        user: 'User',
+        panel_user_id: Any,
+        id_map: dict[int, 'User'],
+    ) -> tuple[bool, _PanelIdMapMutation | None]:
+        """Обновляет панельный id пользователя, если он изменился в панели."""
+
+        # Обе стороны приводим к int: колонка BigInteger против значения из
+        # JSON-снапшота панели. Сравнение int со str всегда False, а значит
+        # каждый проход синка переписывал бы идентичность всей базе и слал бы
+        # уведомление об этом.
+        panel_id = _normalize_panel_user_id(panel_user_id)
+        if panel_id is None:
+            return False, None
+
+        current_id = _normalize_panel_user_id(getattr(user, 'remnawave_id', None))
+        if current_id == panel_id:
+            return False, None
+
+        mutation = _PanelIdMapMutation(id_map)
+
+        conflicting_user = id_map.get(panel_id)
+        if conflicting_user and conflicting_user is not user:
+            logger.warning(
+                '♻️ Обнаружен конфликт панельного id между пользователями и . Сбрасываем у старой записи.',
+                panel_user_id=panel_id,
+                getattr=getattr(conflicting_user, 'telegram_id', '?'),
+                getattr_2=getattr(user, 'telegram_id', '?'),
+            )
+            mutation.set_user_panel_id(conflicting_user, None)
+            mutation.set_user_updated_at(conflicting_user, datetime.now(UTC))
+            mutation.remove_map_entry(panel_id)
+
+        if current_id:
+            mutation.remove_map_entry(current_id)
+
+        mutation.set_user_panel_id(user, panel_id)
+        mutation.set_user_updated_at(user, datetime.now(UTC))
+        mutation.set_map_entry(panel_id, user)
+
+        logger.info(
+            '🔁 Обновлён RemnaWave id пользователя',
+            getattr=getattr(user, 'telegram_id', '?'),
+            current_panel_user_id=current_id,
+            panel_user_id=panel_id,
+        )
+
+        if mutation.has_changes():
+            return True, mutation
+
+        return True, None
+
+    @asynccontextmanager
+    async def get_api_client(self):
+        self._ensure_configured()
+        assert self._api_kwargs is not None
+        api = RemnaWaveAPI(**self._api_kwargs)
+        async with api:
+            yield api
+
+    def _now_utc(self) -> datetime:
+        """Возвращает текущее время в UTC без привязки к часовому поясу."""
+        return datetime.now(self._utc_timezone)
+
+    def _local_to_utc(self, local_dt: datetime) -> datetime:
+        """Конвертирует naive локальную дату (в таймзоне панели/бота) в naive UTC.
+
+        Используется для корректного сравнения дат из БД с датами из RemnaWave.
+        """
+        if local_dt.tzinfo is not None:
+            # Уже есть tzinfo - конвертируем напрямую
+            return local_dt.astimezone(self._utc_timezone)
+        # Naive datetime - интерпретируем как локальное время панели
+        local_aware = local_dt.replace(tzinfo=self._panel_timezone)
+        return local_aware.astimezone(self._utc_timezone)
+
+    def _parse_remnawave_date(self, date_str: str) -> datetime:
+        if not date_str:
+            return self._now_utc() + timedelta(days=30)
+
+        try:
+            cleaned_date = date_str.strip()
+
+            if cleaned_date.endswith('Z'):
+                cleaned_date = cleaned_date[:-1] + '+00:00'
+
+            if '+00:00+00:00' in cleaned_date:
+                cleaned_date = cleaned_date.replace('+00:00+00:00', '+00:00')
+
+            cleaned_date = re.sub(r'(\+\d{2}:\d{2})\+\d{2}:\d{2}$', r'\1', cleaned_date)
+
+            parsed_date = datetime.fromisoformat(cleaned_date)
+
+            # Панель RemnaWave всегда отдаёт время в UTC
+            # Если есть tzinfo - конвертируем в UTC, иначе считаем что уже UTC
+            if parsed_date.tzinfo is not None:
+                utc_normalized = parsed_date.astimezone(self._utc_timezone)
+            else:
+                utc_normalized = parsed_date.replace(tzinfo=UTC)
+
+            logger.debug('Успешно распарсена дата: (UTC)', date_str=date_str, utc_normalized=utc_normalized)
+            return utc_normalized
+
+        except Exception as e:
+            logger.warning('⚠️ Не удалось распарсить дату . Используем дефолтную дату.', date_str=date_str, error=e)
+            return self._now_utc() + timedelta(days=30)
+
+    def _safe_panel_expire_date(self, panel_user: dict[str, Any]) -> datetime:
+        """Парсит дату окончания подписки пользователя панели для сравнения."""
+
+        expire_at_value = panel_user.get('expireAt')
+
+        if expire_at_value is None:
+            return datetime.min.replace(tzinfo=UTC)
+
+        expire_at_str = str(expire_at_value).strip()
+        if not expire_at_str:
+            return datetime.min.replace(tzinfo=UTC)
+
+        return self._parse_remnawave_date(expire_at_str)
+
+    def _is_preferred_panel_user(
+        self,
+        *,
+        candidate: dict[str, Any],
+        current: dict[str, Any],
+    ) -> bool:
+        """Определяет, является ли новая запись предпочтительной для Telegram ID."""
+
+        candidate_expire = self._safe_panel_expire_date(candidate)
+        current_expire = self._safe_panel_expire_date(current)
+
+        if candidate_expire > current_expire:
+            return True
+        if candidate_expire < current_expire:
+            return False
+
+        candidate_status = (candidate.get('status') or '').upper()
+        current_status = (current.get('status') or '').upper()
+
+        active_statuses = {'ACTIVE', 'TRIAL'}
+        if candidate_status in active_statuses and current_status not in active_statuses:
+            return True
+
+        return False
+
+    def _deduplicate_panel_users_by_telegram_id(
+        self,
+        panel_users: list[dict[str, Any]],
+    ) -> dict[Any, dict[str, Any]]:
+        """Возвращает уникальных пользователей панели по Telegram ID."""
+
+        unique_users: dict[Any, dict[str, Any]] = {}
+
+        for panel_user in panel_users:
+            telegram_id = panel_user.get('telegramId')
+            if telegram_id is None:
+                continue
+
+            existing_user = unique_users.get(telegram_id)
+            if existing_user is None or self._is_preferred_panel_user(
+                candidate=panel_user,
+                current=existing_user,
+            ):
+                unique_users[telegram_id] = panel_user
+
+        return unique_users
+
+    def _extract_user_data_from_description(self, description: str) -> tuple[str | None, str | None, str | None]:
+        """
+        Извлекает имя, фамилию и username из описания пользователя в панели Remnawave.
+
+        Args:
+            description: Описание пользователя из панели
+
+        Returns:
+            Tuple[first_name, last_name, username] - извлеченные данные
+        """
+        logger.debug('📥 Парсинг описания пользователя', description=description)
+
+        if not description:
+            logger.debug('❌ Пустое описание пользователя')
+            return None, None, None
+
+        # Ищем строки в формате "Bot user: ..."
+        import re
+
+        # Паттерн для извлечения данных из "Bot user: Name @username" или "Bot user: Name"
+        # Также поддерживаем просто "Name @username" без префикса
+        bot_user_patterns = [
+            r'Bot user:\s*(.+)',  # С префиксом
+            r'^([\w\s]+(?:@[\w_]+)?)$',  # Без префикса
+        ]
+
+        user_info = None
+        for pattern in bot_user_patterns:
+            match = re.search(pattern, description)
+            if match:
+                user_info = match.group(1).strip()
+                logger.debug('🔍 Найдена информация о пользователе', user_info=user_info)
+                break
+
+        if not user_info:
+            logger.debug('❌ Не удалось найти информацию о пользователе в описании')
+            return None, None, None
+
+        # Паттерн для извлечения username (@username в конце)
+        username_pattern = r'\s+(@[\w_]+)$'
+        username_match = re.search(username_pattern, user_info)
+
+        if username_match:
+            username_with_at = username_match.group(1)
+            username = username_with_at.removeprefix('@')  # Убираем символ @
+            # Убираем username из основной информации
+            name_part = user_info[: username_match.start()].strip()
+            logger.debug(
+                '📱 Найден username',
+                username_with_at=username_with_at,
+                username=username,
+                name_part=name_part,
+            )
+        else:
+            username = None
+            name_part = user_info
+            logger.debug('📱 Username не найден, имя', name_part=name_part)
+
+        # Разделяем имя и фамилию
+        if name_part and not name_part.startswith('@'):
+            # Если есть имя (не начинается с @), используем его
+            name_parts = name_part.split()
+            logger.debug('🔤 Части имени', name_parts=name_parts)
+
+            if len(name_parts) >= 2:
+                # Первое слово - имя, остальные - фамилия
+                first_name = name_parts[0]
+                last_name = ' '.join(name_parts[1:]) if len(name_parts) > 1 else None
+                logger.debug('👤 Имя: Фамилия', first_name=first_name, last_name=last_name)
+            elif len(name_parts) == 1 and not name_parts[0].startswith('@'):
+                # Только имя
+                first_name = name_parts[0]
+                last_name = None
+                logger.debug('👤 Только имя', first_name=first_name)
+            else:
+                first_name = None
+                last_name = None
+                logger.debug('👤 Имя не определено')
+        else:
+            first_name = None
+            last_name = None
+            logger.debug('👤 Имя не определено (начинается с @)')
+
+        logger.debug(
+            '✅ Результат парсинга имени',
+            first_name=first_name,
+            last_name=last_name,
+            username=username,
+        )
+        return first_name, last_name, username
+
+    async def _get_or_create_bot_user_from_panel(
+        self,
+        db: AsyncSession,
+        panel_user: dict[str, Any],
+    ) -> tuple[User | None, bool]:
+        """Возвращает пользователя бота, создавая его при необходимости.
+
+        При конфликте уникальности telegram_id повторно загружает пользователя
+        из базы данных и сообщает, что запись не была создана заново.
+        """
+
+        telegram_id = panel_user.get('telegramId')
+        if telegram_id is None:
+            return None, False
+
+        # Извлекаем настоящее имя пользователя из описания
+        description = panel_user.get('description') or ''
+        first_name_from_desc, last_name_from_desc, username_from_desc = self._extract_user_data_from_description(
+            description
+        )
+
+        # Используем извлеченное имя или дефолтное значение
+        fallback_first_name = f'User {telegram_id}'
+        full_first_name = fallback_first_name
+        full_last_name = None
+
+        if (first_name_from_desc and last_name_from_desc) or first_name_from_desc:
+            full_first_name = first_name_from_desc
+            full_last_name = last_name_from_desc
+
+        username = username_from_desc or panel_user.get('username')
+
+        try:
+            create_kwargs = dict(
+                db=db,
+                telegram_id=telegram_id,
+                username=username,
+                first_name=full_first_name,
+                last_name=full_last_name,
+                language='ru',
+            )
+
+            # Используем SAVEPOINT чтобы при IntegrityError откатить только
+            # вложенную транзакцию, а не всю сессию. Полный rollback помечает
+            # ВСЕ объекты сессии как expired, что вызывает MissingGreenlet
+            # при последующем sync-доступе к атрибутам ORM-объектов.
+            async with db.begin_nested():
+                db_user = await create_user_no_commit(**create_kwargs)
+            return db_user, True
+        except IntegrityError as create_error:
+            logger.info(
+                '♻️ Пользователь с telegram_id уже существует. Используем существующую запись.', telegram_id=telegram_id
+            )
+
+            try:
+                existing_user = await get_user_by_telegram_id(db, telegram_id)
+                if existing_user is None:
+                    logger.error(
+                        '❌ Не удалось найти существующего пользователя с telegram_id', telegram_id=telegram_id
+                    )
+                    return None, False
+
+                logger.debug(
+                    'Используется существующий пользователь после конфликта уникальности',
+                    telegram_id=telegram_id,
+                    create_error=create_error,
+                )
+                return existing_user, False
+            except Exception as load_error:
+                logger.error(
+                    '❌ Ошибка загрузки существующего пользователя', telegram_id=telegram_id, load_error=load_error
+                )
+                return None, False
+        except Exception as general_error:
+            # SAVEPOINT (begin_nested) уже откатил частичную работу.
+            # Полный rollback не нужен — он бы пометил все объекты сессии expired.
+            logger.error(
+                '❌ Общая ошибка создания/загрузки пользователя', telegram_id=telegram_id, general_error=general_error
+            )
+            return None, False
+
+    async def get_system_statistics(self) -> dict[str, Any]:
+        try:
+            async with self.get_api_client() as api:
+                logger.info('Получение системной статистики RemnaWave...')
+
+                try:
+                    system_stats = await api.get_system_stats()
+                    logger.info('Системная статистика получена')
+                except Exception as e:
+                    logger.error('Ошибка получения системной статистики', error=e)
+                    system_stats = {}
+
+                try:
+                    bandwidth_stats = await api.get_bandwidth_stats(tz=settings.TIMEZONE)
+                    logger.info('Статистика трафика получена')
+                except Exception as e:
+                    logger.error('Ошибка получения статистики трафика', error=e)
+                    bandwidth_stats = {}
+
+                try:
+                    realtime_usage = await api.get_nodes_realtime_usage()
+                    logger.info('Реалтайм статистика получена')
+                except Exception as e:
+                    logger.error('Ошибка получения реалтайм статистики', error=e)
+                    realtime_usage = []
+
+                try:
+                    nodes_stats = await api.get_nodes_statistics()
+                except Exception as e:
+                    logger.error('Ошибка получения статистики нод', error=e)
+                    nodes_stats = {}
+
+                # Реальное число онлайн-нод. ВАЖНО: panel `nodes.totalOnline` — это
+                # онлайн-ЮЗЕРЫ на нодах, а не число нод (отсюда «56» при 5 нодах в
+                # кабинете). Считаем по списку нод, как в health-проверке.
+                try:
+                    all_nodes = await api.get_all_nodes()
+                    nodes_online = sum(1 for n in all_nodes if n.is_connected and not n.is_disabled)
+                    total_nodes = len(all_nodes)
+                except Exception as e:
+                    logger.warning('Не удалось получить список нод для подсчёта онлайн', error=e)
+                    nodes_online = 0
+                    total_nodes = 0
+
+                total_download = sum(node.get('downloadBytes', 0) for node in realtime_usage)
+                total_upload = sum(node.get('uploadBytes', 0) for node in realtime_usage)
+                total_realtime_traffic = total_download + total_upload
+
+                # В 3.0.0 (как и в 2.8.35) блок `users` содержит только
+                # statusCounts и totalUsers; суммарный трафик живёт в
+                # `nodes.totalBytesLifetime` и приходит СТРОКОЙ. Прежнее чтение
+                # несуществующего `users.totalTrafficBytes` всегда давало 0.
+                # Контракт объявляет поле как z.string(). Голый int() валил ВЕСЬ
+                # ответ статистики на любой нечисловой форме, подменяя неверный,
+                # но безобидный ноль экраном ошибки.
+                try:
+                    total_user_traffic = int(str(system_stats.get('nodes', {}).get('totalBytesLifetime') or 0).strip())
+                except (TypeError, ValueError):
+                    logger.warning(
+                        'Панель вернула нечисловой totalBytesLifetime',
+                        value=system_stats.get('nodes', {}).get('totalBytesLifetime'),
+                    )
+                    total_user_traffic = 0
+
+                nodes_weekly_data = []
+                if nodes_stats.get('lastSevenDays'):
+                    nodes_by_name = {}
+                    for day_data in nodes_stats['lastSevenDays']:
+                        node_name = day_data['nodeName']
+                        if node_name not in nodes_by_name:
+                            nodes_by_name[node_name] = {'name': node_name, 'total_bytes': 0, 'days_data': []}
+
+                        daily_bytes = int(day_data['totalBytes'])
+                        nodes_by_name[node_name]['total_bytes'] += daily_bytes
+                        nodes_by_name[node_name]['days_data'].append({'date': day_data['date'], 'bytes': daily_bytes})
+
+                    nodes_weekly_data = list(nodes_by_name.values())
+                    nodes_weekly_data.sort(key=lambda x: x['total_bytes'], reverse=True)
+
+                uptime_seconds = 0
+                uptime_value = system_stats.get('uptime')
+                try:
+                    uptime_seconds = int(float(uptime_value)) if uptime_value is not None else 0
+                except (TypeError, ValueError):
+                    logger.warning('Не удалось преобразовать uptime в число, используем 0', uptime_value=uptime_value)
+
+                result = {
+                    'system': {
+                        'users_online': system_stats.get('onlineStats', {}).get('onlineNow', 0),
+                        'total_users': system_stats.get('users', {}).get('totalUsers', 0),
+                        'active_connections': system_stats.get('onlineStats', {}).get('onlineNow', 0),
+                        'nodes_online': nodes_online,
+                        'total_nodes': total_nodes,
+                        'users_last_day': system_stats.get('onlineStats', {}).get('lastDay', 0),
+                        'users_last_week': system_stats.get('onlineStats', {}).get('lastWeek', 0),
+                        'users_never_online': system_stats.get('onlineStats', {}).get('neverOnline', 0),
+                        'total_user_traffic': total_user_traffic,
+                    },
+                    'users_by_status': system_stats.get('users', {}).get('statusCounts', {}),
+                    'server_info': {
+                        'cpu_cores': system_stats.get('cpu', {}).get('cores', 0),
+                        'memory_total': system_stats.get('memory', {}).get('total', 0),
+                        'memory_used': system_stats.get('memory', {}).get('used', 0),
+                        'memory_free': system_stats.get('memory', {}).get('free', 0),
+                        'uptime_seconds': uptime_seconds,
+                    },
+                    'bandwidth': {
+                        'realtime_download': total_download,
+                        'realtime_upload': total_upload,
+                        'realtime_total': total_realtime_traffic,
+                    },
+                    'traffic_periods': {
+                        'last_2_days': {
+                            'current': self._parse_bandwidth_string(
+                                bandwidth_stats.get('bandwidthLastTwoDays', {}).get('current', '0 B')
+                            ),
+                            'previous': self._parse_bandwidth_string(
+                                bandwidth_stats.get('bandwidthLastTwoDays', {}).get('previous', '0 B')
+                            ),
+                            'difference': bandwidth_stats.get('bandwidthLastTwoDays', {}).get('difference', '0 B'),
+                        },
+                        'last_7_days': {
+                            'current': self._parse_bandwidth_string(
+                                bandwidth_stats.get('bandwidthLastSevenDays', {}).get('current', '0 B')
+                            ),
+                            'previous': self._parse_bandwidth_string(
+                                bandwidth_stats.get('bandwidthLastSevenDays', {}).get('previous', '0 B')
+                            ),
+                            'difference': bandwidth_stats.get('bandwidthLastSevenDays', {}).get('difference', '0 B'),
+                        },
+                        'last_30_days': {
+                            'current': self._parse_bandwidth_string(
+                                bandwidth_stats.get('bandwidthLast30Days', {}).get('current', '0 B')
+                            ),
+                            'previous': self._parse_bandwidth_string(
+                                bandwidth_stats.get('bandwidthLast30Days', {}).get('previous', '0 B')
+                            ),
+                            'difference': bandwidth_stats.get('bandwidthLast30Days', {}).get('difference', '0 B'),
+                        },
+                        'current_month': {
+                            'current': self._parse_bandwidth_string(
+                                bandwidth_stats.get('bandwidthCalendarMonth', {}).get('current', '0 B')
+                            ),
+                            'previous': self._parse_bandwidth_string(
+                                bandwidth_stats.get('bandwidthCalendarMonth', {}).get('previous', '0 B')
+                            ),
+                            'difference': bandwidth_stats.get('bandwidthCalendarMonth', {}).get('difference', '0 B'),
+                        },
+                        'current_year': {
+                            'current': self._parse_bandwidth_string(
+                                bandwidth_stats.get('bandwidthCurrentYear', {}).get('current', '0 B')
+                            ),
+                            'previous': self._parse_bandwidth_string(
+                                bandwidth_stats.get('bandwidthCurrentYear', {}).get('previous', '0 B')
+                            ),
+                            'difference': bandwidth_stats.get('bandwidthCurrentYear', {}).get('difference', '0 B'),
+                        },
+                    },
+                    'nodes_realtime': realtime_usage,
+                    'nodes_weekly': nodes_weekly_data,
+                    'last_updated': datetime.now(UTC),
+                }
+
+                logger.info(
+                    'Статистика сформирована',
+                    result=result['system']['total_users'],
+                    total_user_traffic=total_user_traffic,
+                )
+                return result
+
+        except RemnaWaveAPIError as e:
+            logger.error('Ошибка Remnawave API при получении статистики', error=e)
+            return {'error': str(e)}
+        except Exception as e:
+            logger.error('Общая ошибка получения системной статистики', error=e)
+            return {'error': f'Внутренняя ошибка сервера: {e!s}'}
+
+    async def get_recap_statistics(self) -> dict[str, Any]:
+        """Recap панели: lifetime/this-month трафик, версия, дата запуска,
+        число стран, суммарно RAM/CPU нод."""
+        try:
+            async with self.get_api_client() as api:
+                recap = await api.get_stats_recap()
+            total = recap.get('total', {}) or {}
+            this_month = recap.get('thisMonth', {}) or {}
+            return {
+                'version': recap.get('version'),
+                'init_date': recap.get('initDate'),
+                'total': {
+                    'users': total.get('users', 0),
+                    'nodes': total.get('nodes', 0),
+                    'traffic_bytes': self._parse_bandwidth_string(total.get('traffic', '0 B')),
+                    'nodes_ram_bytes': self._parse_bandwidth_string(total.get('nodesRam', '0 B')),
+                    'nodes_cpu_cores': total.get('nodesCpuCores', 0),
+                    'distinct_countries': total.get('distinctCountries', 0),
+                },
+                'this_month': {
+                    'users': this_month.get('users', 0),
+                    'traffic_bytes': self._parse_bandwidth_string(this_month.get('traffic', '0 B')),
+                },
+            }
+        except Exception as e:
+            logger.error('Ошибка получения recap-статистики', error=e)
+            return {'error': str(e)}
+
+    async def get_devices_statistics(self) -> dict[str, Any]:
+        """HWID-статистика: разбивка устройств по платформам/приложениям + тоталы."""
+        try:
+            async with self.get_api_client() as api:
+                data = await api.get_hwid_devices_stats()
+                try:
+                    top = await api.get_hwid_top_users(size=10)
+                except Exception:
+                    top = {}
+            stats = data.get('stats', {}) or {}
+            by_platform = data.get('byPlatform', []) or []
+
+            # 2.8.0: top-level byApp убран — он переехал внутрь byPlatform[].byApp.
+            # Backward-compat: сначала пробуем top-level (панели 2.7.x), иначе
+            # агрегируем вложенные byApp по всем платформам, суммируя count по имени.
+            by_app_raw = data.get('byApp')
+            if not by_app_raw:
+                app_counts: dict[str, int] = {}
+                for p in by_platform:
+                    nested = p.get('byApp')
+                    if not isinstance(nested, list):  # malformed/absent — skip, don't blow up the whole payload
+                        continue
+                    for a in nested:
+                        name = a.get('app') or 'Unknown'
+                        app_counts[name] = app_counts.get(name, 0) + (a.get('count') or 0)
+                by_app_raw = [{'app': name, 'count': count} for name, count in app_counts.items()]
+
+            return {
+                'top_users': [
+                    {'username': u.get('username') or '', 'devices_count': u.get('devicesCount', 0)}
+                    for u in top.get('users', [])
+                ],
+                'by_platform': [
+                    {'platform': p.get('platform') or 'Unknown', 'count': p.get('count') or 0} for p in by_platform
+                ],
+                'by_app': [{'app': a.get('app') or 'Unknown', 'count': a.get('count') or 0} for a in by_app_raw],
+                'total_unique_devices': stats.get('totalUniqueDevices', 0),
+                'total_hwid_devices': stats.get('totalHwidDevices', 0),
+                'average_devices_per_user': stats.get('averageHwidDevicesPerUser', 0),
+            }
+        except Exception as e:
+            logger.error('Ошибка получения статистики устройств', error=e)
+            return {'error': str(e)}
+
+    async def get_top_consumers(self, days: int = 7, limit: int = 10) -> dict[str, Any]:
+        """Топ юзеров по трафику за N дней, агрегировано по всем нодам."""
+        try:
+            async with self.get_api_client() as api:
+                nodes = await api.get_all_nodes()
+                end = datetime.now(UTC)
+                start = end - timedelta(days=days)
+                # This endpoint validates start/end as date-only (YYYY-MM-DD);
+                # sending a full ISO datetime fails panel validation (400).
+                start_str = start.date().isoformat()
+                end_str = end.date().isoformat()
+
+                totals: dict[str, int] = {}
+                for node in nodes:
+                    try:
+                        data = await api.get_bandwidth_stats_node_users(
+                            node.uuid, start_str, end_str, top_users_limit=limit
+                        )
+                    except Exception as node_err:
+                        logger.warning('Не удалось получить топ юзеров ноды', node=node.uuid, error=node_err)
+                        continue
+                    for u in data.get('topUsers', []):
+                        username = u.get('username') or ''
+                        if not username:
+                            continue
+                        totals[username] = totals.get(username, 0) + int(u.get('total', 0) or 0)
+
+            top = sorted(totals.items(), key=lambda kv: kv[1], reverse=True)[:limit]
+            return {
+                'period_days': days,
+                'users': [{'username': name, 'total_bytes': tot} for name, tot in top],
+            }
+        except Exception as e:
+            logger.error('Ошибка получения топ потребителей', error=e)
+            return {'error': str(e)}
+
+    async def get_health_statistics(self) -> dict[str, Any]:
+        """Health процесса панели: RAM (rss/heap), задержка event-loop (p99), uptime."""
+        try:
+            async with self.get_api_client() as api:
+                data = await api.get_health()
+            metrics = data.get('runtimeMetrics', []) or []
+            # Несколько инстансов панели — берём самый свежий по timestamp.
+            latest = max(metrics, key=lambda m: m.get('timestamp', 0)) if metrics else {}
+            return {
+                'instances': len(metrics),
+                'rss_bytes': latest.get('rss', 0),
+                'heap_used_bytes': latest.get('heapUsed', 0),
+                'heap_total_bytes': latest.get('heapTotal', 0),
+                'event_loop_delay_ms': latest.get('eventLoopDelayMs', 0),
+                'event_loop_p99_ms': latest.get('eventLoopP99Ms', 0),
+                'uptime_seconds': int(latest.get('uptime', 0) or 0),
+                'instance_id': latest.get('instanceId'),
+            }
+        except Exception as e:
+            logger.error('Ошибка получения health панели', error=e)
+            return {'error': str(e)}
+
+    async def get_subscription_request_statistics(self) -> dict[str, Any]:
+        """Статистика запросов подписки: разбивка по клиентам (byParsedApp)."""
+        try:
+            async with self.get_api_client() as api:
+                data = await api.get_subscription_request_stats()
+            by_app = [
+                {'app': a.get('app') or 'Unknown', 'count': a.get('count', 0)}
+                for a in (data.get('byParsedApp', []) or [])
+            ]
+            return {'by_app': sorted(by_app, key=lambda x: x['count'], reverse=True)}
+        except Exception as e:
+            logger.error('Ошибка получения статистики запросов подписки', error=e)
+            return {'error': str(e)}
+
+    def _parse_bandwidth_string(self, bandwidth_str: str | float) -> int:
+        try:
+            # Some panel fields (e.g. recap totals) return a raw byte count as a
+            # number or an all-digit string instead of a unit-suffixed string.
+            if isinstance(bandwidth_str, (int, float)):
+                return int(bandwidth_str)
+            if not bandwidth_str or bandwidth_str == '0 B' or bandwidth_str == '0':
+                return 0
+
+            bandwidth_str = bandwidth_str.replace(' ', '').upper()
+
+            # Plain numeric string with no unit is already bytes.
+            if re.fullmatch(r'[0-9]+([.,][0-9]+)?', bandwidth_str):
+                return int(float(bandwidth_str.replace(',', '.')))
+
+            units = {
+                'B': 1,
+                'KB': 1024,
+                'MB': 1024**2,
+                'GB': 1024**3,
+                'TB': 1024**4,
+                'PB': 1024**5,
+                'KIB': 1024,
+                'MIB': 1024**2,
+                'GIB': 1024**3,
+                'TIB': 1024**4,
+                'PIB': 1024**5,
+                'KBPS': 1024,
+                'MBPS': 1024**2,
+                'GBPS': 1024**3,
+                'TBPS': 1024**4,
+            }
+
+            match = re.match(r'([0-9.,]+)([A-Z]+)', bandwidth_str)
+            if match:
+                value_str = match.group(1).replace(',', '.')
+                value = float(value_str)
+                unit = match.group(2)
+
+                if unit in units:
+                    result = int(value * units[unit])
+                    logger.debug('Парсинг = байт', bandwidth_str=bandwidth_str, value=value, unit=unit, result=result)
+                    return result
+                logger.warning('Неизвестная единица измерения', unit=unit)
+
+            logger.warning('Не удалось распарсить строку трафика', bandwidth_str=bandwidth_str)
+            return 0
+
+        except Exception as e:
+            logger.error('Ошибка парсинга строки трафика', bandwidth_str=bandwidth_str, error=e)
+            return 0
+
+    async def get_all_nodes(self) -> list[dict[str, Any]]:
+        try:
+            async with self.get_api_client() as api:
+                nodes = await api.get_all_nodes()
+
+                result = []
+                for node in nodes:
+                    result.append(
+                        {
+                            'uuid': node.uuid,
+                            'name': node.name,
+                            'address': node.address,
+                            'country_code': node.country_code,
+                            'is_connected': node.is_connected,
+                            'is_disabled': node.is_disabled,
+                            'is_node_online': node.is_node_online,
+                            'is_xray_running': node.is_xray_running,
+                            'users_online': node.users_online,
+                            'traffic_used_bytes': node.traffic_used_bytes,
+                            'traffic_limit_bytes': node.traffic_limit_bytes,
+                            'xray_uptime': node.xray_uptime,
+                            'provider_uuid': node.provider_uuid,
+                            'provider_name': node.provider_name,
+                            'provider_favicon': node.provider_favicon,
+                            'versions': node.versions,
+                            'system': node.system,
+                            'active_plugin_uuid': node.active_plugin_uuid,
+                            'ips': node.ips,
+                        }
+                    )
+
+                logger.info('✅ Получено нод из Remnawave', result_count=len(result))
+                return result
+
+        except Exception as e:
+            logger.error('Ошибка получения нод из Remnawave', error=e)
+            return []
+
+    async def test_connection(self) -> bool:
+        try:
+            async with self.get_api_client() as api:
+                await api.get_system_stats()
+                logger.info('✅ Соединение с Remnawave API работает')
+                return True
+
+        except Exception as e:
+            logger.error('❌ Ошибка соединения с Remnawave API', error=e)
+            return False
+
+    async def get_node_details(self, node_uuid: str) -> dict[str, Any] | None:
+        try:
+            async with self.get_api_client() as api:
+                node = await api.get_node_by_uuid(node_uuid)
+
+                if not node:
+                    return None
+
+                return {
+                    'uuid': node.uuid,
+                    'name': node.name,
+                    'address': node.address,
+                    'country_code': node.country_code,
+                    'is_connected': node.is_connected,
+                    'is_disabled': node.is_disabled,
+                    'is_node_online': node.is_node_online,
+                    'is_xray_running': node.is_xray_running,
+                    'users_online': node.users_online,
+                    'traffic_used_bytes': node.traffic_used_bytes or 0,
+                    'traffic_limit_bytes': node.traffic_limit_bytes or 0,
+                    'last_status_change': node.last_status_change,
+                    'last_status_message': node.last_status_message,
+                    'xray_uptime': node.xray_uptime,
+                    'is_traffic_tracking_active': node.is_traffic_tracking_active,
+                    'traffic_reset_day': node.traffic_reset_day,
+                    'notify_percent': node.notify_percent,
+                    'consumption_multiplier': node.consumption_multiplier,
+                    'created_at': node.created_at,
+                    'updated_at': node.updated_at,
+                    'provider_uuid': node.provider_uuid,
+                    'provider_name': node.provider_name,
+                    'provider_favicon': node.provider_favicon,
+                    'versions': node.versions,
+                    'system': node.system,
+                    'active_plugin_uuid': node.active_plugin_uuid,
+                    'ips': node.ips,
+                }
+
+        except Exception as e:
+            logger.error('Ошибка получения информации о ноде', node_uuid=node_uuid, error=e)
+            return None
+
+    async def manage_node(self, node_uuid: str, action: str) -> bool:
+        try:
+            async with self.get_api_client() as api:
+                if action == 'enable':
+                    await api.enable_node(node_uuid)
+                elif action == 'disable':
+                    await api.disable_node(node_uuid)
+                elif action == 'restart':
+                    await api.restart_node(node_uuid)
+                else:
+                    return False
+
+                logger.info('✅ Действие выполнено для ноды', action=action, node_uuid=node_uuid)
+                return True
+
+        except Exception as e:
+            logger.error('Ошибка управления нодой', node_uuid=node_uuid, error=e)
+            return False
+
+    async def restart_all_nodes(self, force_restart: bool = False) -> bool:
+        try:
+            async with self.get_api_client() as api:
+                result = await api.restart_all_nodes(force_restart=force_restart)
+
+                if result:
+                    logger.info('✅ Команда перезагрузки всех нод отправлена')
+
+                return result
+
+        except Exception as e:
+            logger.error('Ошибка перезагрузки всех нод', error=e)
+            return False
+
+    async def request_node_geocheck(
+        self,
+        node_uuid: str,
+        ip: str | None = None,
+        interface: str | None = None,
+    ) -> str:
+        """Ставит GeoCheck ноды в очередь и возвращает ``jobId``.
+
+        В отличие от остальных методов по нодам, ошибки панели тут НЕ гасятся:
+        вызывающему коду нужно отличить «панель старее 3.3.0» (404) от «нода
+        офлайн» (400) и показать это админу, а не молча вернуть ``False``.
+        """
+        self._ensure_configured()
+        async with self.get_api_client() as api:
+            job_id = await api.request_node_geocheck(node_uuid, ip=ip, interface=interface)
+            logger.info('GeoCheck поставлен в очередь', node_uuid=node_uuid, job_id=job_id)
+            return job_id
+
+    async def get_node_geocheck_result(self, job_id: str) -> dict[str, Any]:
+        """Статус задачи GeoCheck: ``{isCompleted, isFailed, result}``."""
+        self._ensure_configured()
+        async with self.get_api_client() as api:
+            return await api.get_node_geocheck_result(job_id)
+
+    async def update_squad_inbounds(self, squad_uuid: str, inbound_uuids: list[str]) -> bool:
+        try:
+            async with self.get_api_client() as api:
+                data = {'uuid': squad_uuid, 'inbounds': inbound_uuids}
+                await api._make_request('PATCH', '/api/internal-squads', data)
+                return True
+        except Exception as e:
+            logger.error('Error updating squad inbounds', error=e)
+            return False
+
+    async def get_all_squads(self) -> list[dict[str, Any]]:
+        try:
+            async with self.get_api_client() as api:
+                squads = await api.get_internal_squads()
+
+                result = []
+                for squad in squads:
+                    inbounds = [
+                        asdict(inbound) if is_dataclass(inbound) else inbound for inbound in squad.inbounds or []
+                    ]
+                    result.append(
+                        {
+                            'uuid': squad.uuid,
+                            'name': squad.name,
+                            'members_count': squad.members_count,
+                            'inbounds_count': squad.inbounds_count,
+                            'inbounds': inbounds,
+                        }
+                    )
+
+                logger.info('✅ Получено сквадов из Remnawave', result_count=len(result))
+                return result
+
+        except Exception as e:
+            logger.error('Ошибка получения сквадов из Remnawave', error=e)
+            return []
+
+    async def create_squad(self, name: str, inbounds: list[str]) -> str | None:
+        try:
+            async with self.get_api_client() as api:
+                squad = await api.create_internal_squad(name, inbounds)
+
+                logger.info('✅ Создан новый сквад', name=name)
+                return squad.uuid
+
+        except Exception as e:
+            logger.error('Ошибка создания сквада', name=name, error=e)
+            return None
+
+    async def update_squad(self, uuid: str, name: str = None, inbounds: list[str] = None) -> bool:
+        try:
+            async with self.get_api_client() as api:
+                await api.update_internal_squad(uuid, name, inbounds)
+
+                logger.info('✅ Обновлен сквад', uuid=uuid)
+                return True
+
+        except Exception as e:
+            logger.error('Ошибка обновления сквада', uuid=uuid, error=e)
+            return False
+
+    async def delete_squad(self, uuid: str) -> bool:
+        try:
+            async with self.get_api_client() as api:
+                result = await api.delete_internal_squad(uuid)
+
+                if result:
+                    logger.info('✅ Удален сквад', uuid=uuid)
+
+                return result
+
+        except Exception as e:
+            logger.error('Ошибка удаления сквада', uuid=uuid, error=e)
+            return False
+
+    async def migrate_squad_users(
+        self,
+        db: AsyncSession,
+        source_uuid: str,
+        target_uuid: str,
+    ) -> dict[str, Any]:
+        """Переносит активных подписок с одного сквада на другой."""
+
+        from app.services.grace_access_runtime import update_panel_user_grace_safe
+
+        if source_uuid == target_uuid:
+            return {
+                'success': False,
+                'error': 'same_squad',
+                'message': 'Источник и назначение совпадают',
+            }
+
+        source_uuid = source_uuid.strip()
+        target_uuid = target_uuid.strip()
+
+        source_server = await get_server_squad_by_uuid(db, source_uuid)
+        target_server = await get_server_squad_by_uuid(db, target_uuid)
+
+        if not source_server or not target_server:
+            return {
+                'success': False,
+                'error': 'not_found',
+                'message': 'Сквады не найдены',
+            }
+
+        subscription_query = (
+            select(Subscription)
+            .options(selectinload(Subscription.user))
+            .where(
+                Subscription.status.in_(
+                    [
+                        SubscriptionStatus.ACTIVE.value,
+                        SubscriptionStatus.TRIAL.value,
+                    ]
+                ),
+                cast(Subscription.connected_squads, String).like(f'%"{source_uuid}"%'),
+            )
+        )
+
+        result = await db.execute(subscription_query)
+        subscriptions = result.scalars().unique().all()
+
+        total_candidates = len(subscriptions)
+        if not subscriptions:
+            logger.info(
+                '🚚 Переезд сквада → : подходящих подписок не найдено', source_uuid=source_uuid, target_uuid=target_uuid
+            )
+            return {
+                'success': True,
+                'total': 0,
+                'updated': 0,
+                'panel_updated': 0,
+                'panel_failed': 0,
+            }
+
+        exit_stack = AsyncExitStack()
+        panel_updated = 0
+        panel_failed = 0
+        updated_subscriptions = 0
+        source_decrement = 0
+        target_increment = 0
+
+        try:
+            needs_panel_update = any(
+                (
+                    subscription.remnawave_id
+                    if settings.is_multi_tariff_enabled()
+                    else (subscription.user and subscription.user.remnawave_id)
+                )
+                for subscription in subscriptions
+            )
+
+            api = None
+            if needs_panel_update:
+                api = await exit_stack.enter_async_context(self.get_api_client())
+
+            for subscription in subscriptions:
+                current_squads = list(subscription.connected_squads or [])
+                if source_uuid not in current_squads:
+                    continue
+
+                had_target_before = target_uuid in current_squads
+                new_squads = [squad_uuid for squad_uuid in current_squads if squad_uuid != source_uuid]
+                if not had_target_before:
+                    new_squads.append(target_uuid)
+
+                _panel_user_id = (
+                    getattr(subscription, 'remnawave_id', None)
+                    if settings.is_multi_tariff_enabled()
+                    else (subscription.user.remnawave_id if subscription.user else None)
+                )
+                if _panel_user_id:
+                    if api is None:
+                        panel_failed += 1
+                        logger.error(
+                            '❌ RemnaWave API недоступен для обновления пользователя',
+                            telegram_id=subscription.user.telegram_id if subscription.user else None,
+                        )
+                        continue
+
+                    try:
+                        await update_panel_user_grace_safe(
+                            api,
+                            subscription.id,
+                            user_id=_panel_user_id,
+                            active_internal_squads=new_squads,
+                        )
+                        panel_updated += 1
+                    except Exception as error:
+                        panel_failed += 1
+                        logger.error(
+                            '❌ Ошибка обновления сквадов пользователя',
+                            telegram_id=subscription.user.telegram_id,
+                            error=error,
+                        )
+                        continue
+
+                subscription.connected_squads = new_squads
+                subscription.updated_at = datetime.now(UTC)
+
+                source_decrement += 1
+                if not had_target_before:
+                    target_increment += 1
+
+                updated_subscriptions += 1
+
+                link_result = await db.execute(
+                    select(SubscriptionServer)
+                    .where(
+                        and_(
+                            SubscriptionServer.subscription_id == subscription.id,
+                            SubscriptionServer.server_squad_id == source_server.id,
+                        )
+                    )
+                    .limit(1)
+                )
+                link = link_result.scalars().first()
+
+                if link:
+                    if had_target_before:
+                        await db.execute(
+                            delete(SubscriptionServer).where(
+                                and_(
+                                    SubscriptionServer.subscription_id == subscription.id,
+                                    SubscriptionServer.server_squad_id == source_server.id,
+                                )
+                            )
+                        )
+                    else:
+                        link.server_squad_id = target_server.id
+                elif not had_target_before:
+                    db.add(
+                        SubscriptionServer(
+                            subscription_id=subscription.id,
+                            server_squad_id=target_server.id,
+                            paid_price_kopeks=0,
+                        )
+                    )
+
+            if updated_subscriptions:
+                # Update in consistent ID order to prevent deadlocks
+                counter_updates = {}
+                if source_decrement:
+                    counter_updates[source_server.id] = func.greatest(ServerSquad.current_users - source_decrement, 0)
+                if target_increment:
+                    counter_updates[target_server.id] = ServerSquad.current_users + target_increment
+                for sid in sorted(counter_updates):
+                    await db.execute(
+                        update(ServerSquad).where(ServerSquad.id == sid).values(current_users=counter_updates[sid])
+                    )
+
+                await db.commit()
+            else:
+                await db.rollback()
+
+            logger.info(
+                '🚚 Завершен переезд сквада → : обновлено подписок (не обновлены в панели)',
+                source_uuid=source_uuid,
+                target_uuid=target_uuid,
+                updated_subscriptions=updated_subscriptions,
+                panel_failed=panel_failed,
+            )
+
+            return {
+                'success': True,
+                'total': total_candidates,
+                'updated': updated_subscriptions,
+                'panel_updated': panel_updated,
+                'panel_failed': panel_failed,
+                'source_removed': source_decrement,
+                'target_added': target_increment,
+            }
+
+        except RemnaWaveConfigurationError:
+            await db.rollback()
+            raise
+        except Exception as error:
+            await db.rollback()
+            logger.error('❌ Ошибка переезда сквада', source_uuid=source_uuid, target_uuid=target_uuid, error=error)
+            return {
+                'success': False,
+                'error': 'unexpected',
+                'message': str(error),
+            }
+        finally:
+            await exit_stack.aclose()
+
+    async def sync_users_from_panel(self, db: AsyncSession, sync_type: str = 'all') -> dict[str, int]:
+        # Выгрузка панели идёт минутами; транзакцию, с которой пришла сессия
+        # (авторизация кабинета, middleware бота), на это время не держим.
+        await release_transaction(db)
+        # In multi-tariff mode, match panel users to subscriptions by remnawave_id
+        if settings.is_multi_tariff_enabled():
+            return await self._sync_users_from_panel_multi(db, sync_type)
+
+        try:
+            stats = {'created': 0, 'updated': 0, 'errors': 0, 'deleted': 0}
+
+            logger.info('🔄 Начинаем синхронизацию типа', sync_type=sync_type)
+
+            # Момент снимка: список панели выгружается целиком и применяется
+            # минутами позже. Всё, что изменилось в боте после этой отметки,
+            # снимок уже не описывает — и переписывать это нельзя.
+            snapshot_taken_at = self._now_utc()
+
+            async with self.get_api_client() as api:
+                panel_users = []
+                cursor: str | None = None
+                size = 500  # Размер страницы курсорной пагинации
+
+                while True:
+                    logger.info('📥 Загружаем пользователей', cursor=cursor, size=size)
+
+                    # 2.8.0: курсорная (keyset) пагинация /api/users/stream — устойчива
+                    # к мутациям во время обхода. enrich_happ_links=False: bulk-список
+                    # не содержит happ.cryptoLink, а обогащать каждого пользователя
+                    # отдельным запросом дорого (и happ-encrypt удалён в 2.8.0).
+                    page = await api.get_all_users_page_stream(cursor=cursor, size=size, enrich_happ_links=False)
+                    users_batch = page['users']
+
+                    logger.info(
+                        '📊 Получена партия пользователей из панели',
+                        users_batch_count=len(users_batch),
+                        loaded_so_far=len(panel_users) + len(users_batch),
+                    )
+
+                    for user_obj in users_batch:
+                        user_dict = {
+                            'id': user_obj.id,
+                            'shortUuid': user_obj.short_uuid,
+                            'username': user_obj.username,
+                            'status': user_obj.status.value,
+                            'telegramId': user_obj.telegram_id,
+                            'email': user_obj.email,  # Email для синхронизации email-only пользователей
+                            'expireAt': user_obj.expire_at.isoformat(),
+                            'trafficLimitBytes': user_obj.traffic_limit_bytes,
+                            'usedTrafficBytes': user_obj.used_traffic_bytes,
+                            'hwidDeviceLimit': user_obj.hwid_device_limit,
+                            'subscriptionUrl': user_obj.subscription_url,
+                            'subscriptionCryptoLink': user_obj.happ_crypto_link,
+                            'activeInternalSquads': user_obj.active_internal_squads,
+                        }
+                        panel_users.append(user_dict)
+
+                    if not page['hasMore'] or not page['nextCursor']:
+                        break
+
+                    cursor = page['nextCursor']
+
+                logger.info('✅ Всего загружено пользователей из панели', panel_users_count=len(panel_users))
+
+            # Загрузка пользователей с их подписками за один запрос (bulk loading)
+            from sqlalchemy import select
+            from sqlalchemy.orm import selectinload
+
+            from app.database.models import Subscription, User
+            from app.services.grace_access_runtime import get_open_grace_subscription_ids
+
+            open_grace_ids = await get_open_grace_subscription_ids(db)
+
+            # Получаем всех пользователей с их подписками за один запрос
+            bot_users_result = await db.execute(
+                select(User).options(selectinload(User.subscriptions).selectinload(Subscription.tariff))
+            )
+            bot_users = bot_users_result.scalars().all()
+            # Filter out email-only users (telegram_id=None) to avoid None key issues
+            bot_users_by_telegram_id = {user.telegram_id: user for user in bot_users if user.telegram_id is not None}
+            bot_users_by_panel_id = {}
+            for user in bot_users:
+                _user_panel_id = _normalize_panel_user_id(getattr(user, 'remnawave_id', None))
+                if _user_panel_id is not None:
+                    bot_users_by_panel_id[_user_panel_id] = user
+            # Index users by email for email-only sync
+            bot_users_by_email = {user.email.lower(): user for user in bot_users if user.email and user.email_verified}
+            # Also index email-only users by their remnawave_id for sync
+            email_users_count = sum(1 for u in bot_users if u.telegram_id is None)
+            if email_users_count > 0:
+                logger.info('📧 Email-only пользователей (без telegram_id)', email_users_count=email_users_count)
+
+            logger.info('📊 Пользователей в боте', bot_users_count=len(bot_users))
+
+            panel_users_with_tg = [user for user in panel_users if user.get('telegramId') is not None]
+
+            logger.info('📊 Пользователей в панели с Telegram ID', panel_users_with_tg_count=len(panel_users_with_tg))
+
+            unique_panel_users_map = self._deduplicate_panel_users_by_telegram_id(panel_users_with_tg)
+            unique_panel_users = list(unique_panel_users_map.values())
+            duplicates_count = len(panel_users_with_tg) - len(unique_panel_users)
+
+            if duplicates_count:
+                logger.info(
+                    '♻️ Обнаружено дубликатов пользователей по Telegram ID. Используем самые свежие записи.',
+                    duplicates_count=duplicates_count,
+                )
+
+            panel_telegram_ids = set(unique_panel_users_map.keys())
+
+            # Email-only пользователи из панели (без telegram_id, но с email)
+            panel_users_email_only = [
+                user for user in panel_users if user.get('telegramId') is None and user.get('email')
+            ]
+            if panel_users_email_only:
+                logger.info(
+                    '📧 Пользователей в панели с Email (без Telegram)',
+                    panel_users_email_only_count=len(panel_users_email_only),
+                )
+
+            # Аккаунты без Telegram id и без почты бот не создавал (он пишет
+            # личность в каждый свой аккаунт) — их не подтягиваем и не трогаем.
+            # Считаем явно, чтобы оператор видел, что они пропущены намеренно.
+            foreign_accounts_count = len(panel_users) - len(panel_users_with_tg) - len(panel_users_email_only)
+            if foreign_accounts_count > 0:
+                logger.info(
+                    '⏭️ Аккаунтов панели без Telegram ID и почты — созданы не ботом, пропускаем',
+                    foreign_accounts_count=foreign_accounts_count,
+                )
+
+            # Для ускорения - подготовим данные о подписках
+            # Соберем все существующие подписки за один запрос
+            existing_subscriptions_result = await db.execute(
+                select(Subscription).join(User).options(selectinload(Subscription.user))
+            )
+            existing_subscriptions = existing_subscriptions_result.scalars().all()
+
+            # Создадим словарь для быстрого доступа к подпискам
+            {sub.user_id: sub for sub in existing_subscriptions}
+
+            # Для оптимизации коммитим изменения каждые N пользователей
+            batch_size = 50
+            pending_panel_id_mutations: list[_PanelIdMapMutation] = []
+
+            for i, panel_user in enumerate(unique_panel_users):
+                panel_id_mutation: _PanelIdMapMutation | None = None
+                try:
+                    telegram_id = panel_user.get('telegramId')
+                    if not telegram_id:
+                        continue
+
+                    if (i + 1) % 10 == 0:
+                        logger.info(
+                            '🔄 Обрабатываем пользователя',
+                            i=i + 1,
+                            unique_panel_users_count=len(unique_panel_users),
+                            telegram_id=telegram_id,
+                        )
+
+                    db_user = bot_users_by_telegram_id.get(telegram_id)
+
+                    if not db_user:
+                        if sync_type in ['new_only', 'all']:
+                            logger.info('🆕 Создание пользователя для telegram_id', telegram_id=telegram_id)
+
+                            db_user, is_created = await self._get_or_create_bot_user_from_panel(db, panel_user)
+
+                            if not db_user:
+                                logger.error(
+                                    '❌ Не удалось создать или получить пользователя для telegram_id',
+                                    telegram_id=telegram_id,
+                                )
+                                stats['errors'] += 1
+                                continue
+
+                            bot_users_by_telegram_id[telegram_id] = db_user
+
+                            # При синхронизации не обновляем имя и username пользователя
+                            # только сохраняем изменения, если были обновлены другие поля (подписка и т.д.)
+                            updated_fields = []
+                            # Если были обновлены другие поля (подписка, статус и т.д.), сохраняем изменения
+                            if updated_fields:
+                                logger.info(
+                                    '🔄 Обновлены поля для пользователя',
+                                    updated_fields=updated_fields,
+                                    telegram_id=telegram_id,
+                                )
+                                await db.flush()  # Сохраняем изменения без коммита
+
+                            _, panel_id_mutation = self._ensure_user_remnawave_id(
+                                db_user,
+                                panel_user.get('id'),
+                                bot_users_by_panel_id,
+                            )
+
+                            if is_created:
+                                await self._create_subscription_from_panel_data(db, db_user, panel_user)
+                                stats['created'] += 1
+                                logger.info('✅ Создан пользователь с подпиской', telegram_id=telegram_id)
+                            else:
+                                # Обновляем данные существующего пользователя
+                                # Но теперь мы уже загрузили подписку с пользователем, нет необходимости перезагружать
+                                await self._update_subscription_from_panel_data(
+                                    db,
+                                    db_user,
+                                    panel_user,
+                                    open_grace_ids=open_grace_ids,
+                                    snapshot_taken_at=snapshot_taken_at,
+                                )
+                                stats['updated'] += 1
+                                logger.info('♻️ Обновлена подписка существующего пользователя', telegram_id=telegram_id)
+
+                    elif sync_type in ['update_only', 'all']:
+                        logger.debug('🔄 Обновление пользователя', telegram_id=telegram_id)
+
+                        # Refresh expired ORM-объекты перед sync-доступом.
+                        # После SAVEPOINT rollback или других операций атрибуты
+                        # могут быть expired, что вызывает MissingGreenlet в sync-коде.
+                        from sqlalchemy import inspect as sa_inspect
+
+                        user_state = sa_inspect(db_user)
+                        if user_state.expired_attributes:
+                            await db.refresh(db_user)
+
+                        # Обновляем панельный id ДО операций с подпиской
+                        _, panel_id_mutation = self._ensure_user_remnawave_id(
+                            db_user,
+                            panel_user.get('id'),
+                            bot_users_by_panel_id,
+                        )
+
+                        # Используем async запрос вместо доступа к relationship,
+                        # чтобы избежать lazy-load в async контексте
+                        if settings.is_multi_tariff_enabled():
+                            from app.database.crud.subscription import get_active_subscriptions_by_user_id as _get_subs
+
+                            _subs = await _get_subs(db, db_user.id)
+                            # Match by remnawave_id from panel. Пустая идентичность
+                            # никогда не матчится: иначе непровиженный черновик
+                            # (remnawave_id IS NULL) поймал бы панельного юзера
+                            # без id и получил бы его состояние.
+                            _panel_id = _normalize_panel_user_id(panel_user.get('id'))
+                            existing_sub = (
+                                next(
+                                    (s for s in _subs if _normalize_panel_user_id(s.remnawave_id) == _panel_id),
+                                    None,
+                                )
+                                if _panel_id is not None
+                                else None
+                            )
+                            if not existing_sub and _subs:
+                                # No panel-id match — fall back to best non-daily subscription
+                                _non_daily = [s for s in _subs if not getattr(s, 'is_daily_tariff', False)]
+                                _pool = _non_daily or _subs
+                                existing_sub = max(_pool, key=lambda s: s.days_left)
+                        else:
+                            from app.database.crud.subscription import get_subscription_by_user_id as _get_sub
+
+                            existing_sub = await _get_sub(db, db_user.id)
+                        if existing_sub:
+                            await self._update_subscription_from_panel_data(
+                                db,
+                                db_user,
+                                panel_user,
+                                open_grace_ids=open_grace_ids,
+                                snapshot_taken_at=snapshot_taken_at,
+                            )
+                        else:
+                            await self._create_subscription_from_panel_data(db, db_user, panel_user)
+
+                        stats['updated'] += 1
+                        logger.debug('✅ Обновлён пользователь', telegram_id=telegram_id)
+
+                except Exception as user_error:
+                    logger.error(
+                        '❌ Ошибка обработки пользователя',
+                        telegram_id=telegram_id,
+                        user_error=user_error,
+                        exc_info=True,
+                    )
+                    stats['errors'] += 1
+                    if panel_id_mutation:
+                        panel_id_mutation.rollback()
+                    if pending_panel_id_mutations:
+                        for mutation in reversed(pending_panel_id_mutations):
+                            mutation.rollback()
+                        pending_panel_id_mutations.clear()
+                    try:
+                        await db.rollback()  # Выполняем rollback при ошибке
+                    except Exception:
+                        pass
+                    # After rollback all ORM objects in the session are expired.
+                    # Accessing their attributes triggers a lazy load which fails
+                    # in async context (greenlet_spawn error).  Break the loop to
+                    # prevent cascading failures for every remaining user.
+                    logger.warning(
+                        '⚠️ Сессия повреждена после rollback, прерываем обработку',
+                        i=i + 1,
+                        unique_panel_users_count=len(unique_panel_users),
+                    )
+                    break
+
+                else:
+                    if panel_id_mutation and panel_id_mutation.has_changes():
+                        pending_panel_id_mutations.append(panel_id_mutation)
+
+                # Коммитим изменения каждые N пользователей для ускорения
+                if (i + 1) % batch_size == 0:
+                    try:
+                        await db.commit()
+                        logger.debug('📦 Коммит изменений после обработки пользователей', i=i + 1)
+                        pending_panel_id_mutations.clear()
+                    except Exception as commit_error:
+                        logger.error(
+                            '❌ Ошибка коммита после обработки пользователей', i=i + 1, commit_error=commit_error
+                        )
+                        await db.rollback()
+                        for mutation in reversed(pending_panel_id_mutations):
+                            mutation.rollback()
+                        pending_panel_id_mutations.clear()
+                        stats['errors'] += batch_size  # Учитываем ошибки за всю группу
+
+            # Коммитим оставшиеся изменения
+            try:
+                await db.commit()
+                pending_panel_id_mutations.clear()
+            except Exception as final_commit_error:
+                logger.error('❌ Ошибка финального коммита', final_commit_error=final_commit_error)
+                await db.rollback()
+                for mutation in reversed(pending_panel_id_mutations):
+                    mutation.rollback()
+                pending_panel_id_mutations.clear()
+
+            # Обработка email-only пользователей из панели
+            if panel_users_email_only and sync_type in ['new_only', 'all']:
+                logger.info(
+                    '📧 Обработка email-only пользователей из панели...',
+                    panel_users_email_only_count=len(panel_users_email_only),
+                )
+
+                for panel_user in panel_users_email_only:
+                    try:
+                        panel_email = panel_user.get('email', '').lower()
+                        panel_user_id = _normalize_panel_user_id(panel_user.get('id'))
+
+                        if not panel_email:
+                            continue
+
+                        # Ищем пользователя по email в боте
+                        db_user = bot_users_by_email.get(panel_email)
+
+                        # Если не нашли по email, ищем по панельному id
+                        if not db_user and panel_user_id is not None:
+                            db_user = bot_users_by_panel_id.get(panel_user_id)
+
+                        if db_user:
+                            # Обновляем существующего пользователя
+                            # Обновляем remnawave_id если нет
+                            if panel_user_id is not None and not db_user.remnawave_id:
+                                db_user.remnawave_id = panel_user_id
+
+                            # Используем async запрос вместо доступа к relationship
+                            if settings.is_multi_tariff_enabled():
+                                from app.database.crud.subscription import (
+                                    get_active_subscriptions_by_user_id as _get_subs_email,
+                                )
+
+                                _subs_e = await _get_subs_email(db, db_user.id)
+                                # Пустая идентичность не матчится — см. основной цикл.
+                                existing_sub = (
+                                    next(
+                                        (
+                                            s
+                                            for s in _subs_e
+                                            if _normalize_panel_user_id(s.remnawave_id) == panel_user_id
+                                        ),
+                                        None,
+                                    )
+                                    if panel_user_id is not None
+                                    else None
+                                )
+                                if not existing_sub and _subs_e:
+                                    # No panel-id match — fall back to best non-daily subscription
+                                    _non_daily_e = [s for s in _subs_e if not getattr(s, 'is_daily_tariff', False)]
+                                    _pool_e = _non_daily_e or _subs_e
+                                    existing_sub = max(_pool_e, key=lambda s: s.days_left)
+                            else:
+                                from app.database.crud.subscription import get_subscription_by_user_id as _get_sub_email
+
+                                existing_sub = await _get_sub_email(db, db_user.id)
+                            if existing_sub:
+                                await self._update_subscription_from_panel_data(
+                                    db,
+                                    db_user,
+                                    panel_user,
+                                    open_grace_ids=open_grace_ids,
+                                    snapshot_taken_at=snapshot_taken_at,
+                                )
+                            else:
+                                await self._create_subscription_from_panel_data(db, db_user, panel_user)
+
+                            stats['updated'] += 1
+                            logger.info('📧 Обновлен email-пользователь', panel_email=panel_email)
+                        else:
+                            # Email-only пользователи не создаются автоматически при синхронизации,
+                            # они должны сначала зарегистрироваться через cabinet
+                            logger.debug('📧 Email-пользователь не найден в боте, пропускаем', panel_email=panel_email)
+
+                    except Exception as email_user_error:
+                        logger.error('❌ Ошибка обработки email-пользователя', email_user_error=email_user_error)
+                        stats['errors'] += 1
+
+                try:
+                    await db.commit()
+                except Exception as email_commit_error:
+                    logger.error('❌ Ошибка коммита email-пользователей', email_commit_error=email_commit_error)
+                    await db.rollback()
+
+            if sync_type == 'all':
+                logger.info('🗑️ Деактивация подписок пользователей, отсутствующих в панели...')
+
+                batch_size = 50
+                processed_count = 0
+                cleanup_panel_id_mutations: list[_PanelIdMapMutation] = []
+
+                # Собираем список пользователей для деактивации
+                users_to_deactivate = [
+                    (telegram_id, db_user)
+                    for telegram_id, db_user in bot_users_by_telegram_id.items()
+                    if telegram_id not in panel_telegram_ids
+                    and any(True for _ in (getattr(db_user, 'subscriptions', None) or []))
+                    # BUG-6 fix: Skip users who have a remnawave_id — they exist in panel
+                    # but may not have telegram_id set there (OAuth users who linked TG later)
+                    and not getattr(db_user, 'remnawave_id', None)
+                ]
+
+                if users_to_deactivate:
+                    logger.info(
+                        '📊 Найдено пользователей для деактивации', users_to_deactivate_count=len(users_to_deactivate)
+                    )
+
+                # Используем один API клиент для всех операций сброса HWID
+                hwid_api_cm = None
+                try:
+                    hwid_api_cm = self.get_api_client()
+                    await hwid_api_cm.__aenter__()
+                except Exception as api_init_error:
+                    logger.warning('⚠️ Не удалось создать API клиент для сброса HWID', api_init_error=api_init_error)
+                    hwid_api_cm = None
+
+                try:
+                    for telegram_id, db_user in users_to_deactivate:
+                        cleanup_mutation: _PanelIdMapMutation | None = None
+                        try:
+                            user_subscriptions = getattr(db_user, 'subscriptions', None) or []
+
+                            # Skip if all subscriptions were recently updated by webhook
+                            from app.database.crud.subscription import is_recently_updated_by_webhook
+
+                            all_recently_updated = all(
+                                is_recently_updated_by_webhook(subscription) for subscription in user_subscriptions
+                            )
+                            if user_subscriptions and all_recently_updated:
+                                logger.debug(
+                                    'Пропуск деактивации подписок: все обновлены вебхуком недавно',
+                                    telegram_id=telegram_id,
+                                )
+                                continue
+
+                            logger.info('🗑️ Деактивация подписок пользователя (нет в панели)', telegram_id=telegram_id)
+
+                            # NOTE: Не сбрасываем HWID здесь — пользователь уже удалён из панели,
+                            # API вернёт 404, панельный id очищается ниже (cleanup_mutation)
+
+                            for subscription in user_subscriptions:
+                                if is_recently_updated_by_webhook(subscription):
+                                    logger.debug(
+                                        'Пропуск деактивации подписки: обновлена вебхуком недавно',
+                                        subscription_id=subscription.id,
+                                    )
+                                    continue
+
+                                try:
+                                    from sqlalchemy import delete
+
+                                    from app.database.models import SubscriptionServer
+
+                                    await decrement_subscription_server_counts(db, subscription)
+
+                                    await db.execute(
+                                        delete(SubscriptionServer).where(
+                                            SubscriptionServer.subscription_id == subscription.id
+                                        )
+                                    )
+                                    logger.info(
+                                        '🗑️ Удалены серверы подписки',
+                                        telegram_id=telegram_id,
+                                        subscription_id=subscription.id,
+                                    )
+                                except Exception as servers_error:
+                                    logger.warning(
+                                        '⚠️ Не удалось удалить серверы подписки',
+                                        servers_error=servers_error,
+                                        subscription_id=subscription.id,
+                                    )
+
+                                from app.database.models import SubscriptionStatus
+
+                                # Проверяем, была ли это платная подписка
+                                was_paid = not subscription.is_trial or getattr(
+                                    db_user, 'has_had_paid_subscription', False
+                                )
+
+                                subscription.status = SubscriptionStatus.DISABLED.value
+
+                                if was_paid:
+                                    # Для платных подписок - НЕ сбрасываем is_trial и end_date!
+                                    # Сохраняем оригинальные значения чтобы можно было восстановить
+                                    logger.warning(
+                                        '⚠️ ПЛАТНАЯ подписка пользователя отключена (нет в панели), но is_trial= и end_date= СОХРАНЕНЫ',
+                                        telegram_id=telegram_id,
+                                        subscription_id=subscription.id,
+                                        is_trial=subscription.is_trial,
+                                        end_date=subscription.end_date,
+                                    )
+                                else:
+                                    # Для триальных подписок - сбрасываем как раньше
+                                    subscription.is_trial = True
+                                    subscription.end_date = datetime.now(UTC)
+                                    subscription.traffic_limit_gb = 0
+                                    subscription.traffic_used_gb = 0.0
+                                    subscription.device_limit = 1
+
+                                subscription.connected_squads = []
+                                subscription.autopay_enabled = False
+                                subscription.remnawave_short_uuid = None
+                                subscription.subscription_url = ''
+                                subscription.subscription_crypto_link = ''
+
+                            old_panel_id = _normalize_panel_user_id(getattr(db_user, 'remnawave_id', None))
+                            cleanup_mutation = _PanelIdMapMutation(bot_users_by_panel_id)
+                            if old_panel_id is not None:
+                                cleanup_mutation.remove_map_entry(old_panel_id)
+                            cleanup_mutation.set_user_panel_id(db_user, None)
+                            cleanup_mutation.set_user_updated_at(db_user, datetime.now(UTC))
+
+                            stats['deleted'] += 1
+                            logger.info(
+                                '✅ Деактивированы подписки пользователя (сохранен баланс)', telegram_id=telegram_id
+                            )
+
+                            processed_count += 1
+
+                        except Exception as delete_error:
+                            logger.error(
+                                '❌ Ошибка деактивации подписки', telegram_id=telegram_id, delete_error=delete_error
+                            )
+                            stats['errors'] += 1
+                            if cleanup_mutation:
+                                cleanup_mutation.rollback()
+                            if cleanup_panel_id_mutations:
+                                for mutation in reversed(cleanup_panel_id_mutations):
+                                    mutation.rollback()
+                                cleanup_panel_id_mutations.clear()
+                            try:
+                                await db.rollback()
+                            except Exception as rollback_error:
+                                logger.debug('Откат сессии после ошибки не удался', error=str(rollback_error))
+                        else:
+                            if cleanup_mutation and cleanup_mutation.has_changes():
+                                cleanup_panel_id_mutations.append(cleanup_mutation)
+
+                            # Коммитим изменения каждые N пользователей
+                            if processed_count % batch_size == 0:
+                                try:
+                                    await db.commit()
+                                    logger.debug(
+                                        '📦 Коммит изменений после деактивации подписок',
+                                        processed_count=processed_count,
+                                    )
+                                    cleanup_panel_id_mutations.clear()
+                                except Exception as commit_error:
+                                    logger.error(
+                                        '❌ Ошибка коммита после деактивации подписок',
+                                        processed_count=processed_count,
+                                        commit_error=commit_error,
+                                    )
+                                    await db.rollback()
+                                    for mutation in reversed(cleanup_panel_id_mutations):
+                                        mutation.rollback()
+                                    cleanup_panel_id_mutations.clear()
+                                    stats['errors'] += batch_size
+                                    break  # Прерываем цикл при ошибке коммита
+
+                    # Коммитим оставшиеся изменения
+                    try:
+                        await db.commit()
+                        cleanup_panel_id_mutations.clear()
+                    except Exception as final_commit_error:
+                        logger.error(
+                            '❌ Ошибка финального коммита при деактивации', final_commit_error=final_commit_error
+                        )
+                        await db.rollback()
+                        for mutation in reversed(cleanup_panel_id_mutations):
+                            mutation.rollback()
+                        cleanup_panel_id_mutations.clear()
+
+                finally:
+                    # Закрываем API клиент
+                    if hwid_api_cm:
+                        try:
+                            await hwid_api_cm.__aexit__(None, None, None)
+                        except Exception:
+                            pass
+
+            logger.info(
+                '🎯 Синхронизация завершена',
+                stats=stats['created'],
+                stats_2=stats['updated'],
+                stats_3=stats['deleted'],
+                stats_4=stats['errors'],
+            )
+            return stats
+
+        except Exception as e:
+            logger.error('❌ Критическая ошибка синхронизации пользователей', error=e)
+            await rollback_quietly(db)  # иначе следующий шаг синхронизации упадёт на этой сессии
+            return {'created': 0, 'updated': 0, 'errors': 1, 'deleted': 0}
+
+    async def _sync_users_from_panel_multi(self, db: AsyncSession, sync_type: str) -> dict[str, int]:
+        """Multi-tariff sync: match panel users to subscriptions by remnawave_id."""
+        from sqlalchemy import select
+        from sqlalchemy.orm import selectinload
+
+        from app.database.models import Subscription
+
+        stats = {'created': 0, 'updated': 0, 'errors': 0, 'deleted': 0}
+        # Момент снимка: см. sync_users_from_panel — список выгружается целиком и
+        # применяется минутами позже.
+        snapshot_taken_at = self._now_utc()
+        try:
+            logger.info('🔄 [multi-tariff] Начинаем синхронизацию типа', sync_type=sync_type)
+
+            # Load all panel users
+            async with self.get_api_client() as api:
+                panel_users = []
+                cursor: str | None = None
+                size = 500
+
+                while True:
+                    page = await api.get_all_users_page_stream(cursor=cursor, size=size, enrich_happ_links=False)
+                    users_batch = page['users']
+                    for user_obj in users_batch:
+                        panel_users.append(
+                            {
+                                'id': user_obj.id,
+                                'shortUuid': user_obj.short_uuid,
+                                'username': user_obj.username,
+                                'status': user_obj.status.value,
+                                'telegramId': user_obj.telegram_id,
+                                'email': user_obj.email,
+                                'expireAt': user_obj.expire_at.isoformat(),
+                                'usedTrafficBytes': user_obj.used_traffic_bytes,
+                                'trafficLimitBytes': user_obj.traffic_limit_bytes,
+                                'hwidDeviceLimit': user_obj.hwid_device_limit,
+                                'subscriptionUrl': user_obj.subscription_url,
+                                'subscriptionCryptoLink': user_obj.happ_crypto_link,
+                                'activeInternalSquads': user_obj.active_internal_squads,
+                            }
+                        )
+                    if not page['hasMore'] or not page['nextCursor']:
+                        break
+                    cursor = page['nextCursor']
+
+            logger.info('✅ [multi-tariff] Загружено из панели', panel_users_count=len(panel_users))
+
+            # Load all subscriptions with remnawave_id
+            subs_result = await db.execute(
+                select(Subscription)
+                .options(selectinload(Subscription.user), selectinload(Subscription.tariff))
+                .where(Subscription.remnawave_id.isnot(None))
+            )
+            all_subs = subs_result.scalars().all()
+            subs_by_panel_id = {}
+            for sub in all_subs:
+                _sub_panel_id = _normalize_panel_user_id(sub.remnawave_id)
+                if _sub_panel_id is not None:
+                    subs_by_panel_id[_sub_panel_id] = sub
+
+            from app.services.grace_access_runtime import get_open_grace_subscription_ids
+
+            open_grace_ids = await get_open_grace_subscription_ids(db)
+
+            # Fallback: build user-level panel id → user map for legacy migration
+            from app.database.models import User
+
+            users_result = await db.execute(
+                select(User)
+                .options(selectinload(User.subscriptions).selectinload(Subscription.tariff))
+                .where(User.remnawave_id.isnot(None))
+            )
+            users_by_panel_id = {}
+            for u in users_result.scalars().all():
+                _u_panel_id = _normalize_panel_user_id(u.remnawave_id)
+                if _u_panel_id is not None:
+                    users_by_panel_id[_u_panel_id] = u
+
+            # Load all bot users for matching unlinked panel users
+            all_users_result = await db.execute(select(User).options(selectinload(User.subscriptions)))
+            _all_users = all_users_result.scalars().all()
+            bot_users_by_tg = {u.telegram_id: u for u in _all_users if u.telegram_id}
+            bot_users_by_email = {u.email.lower(): u for u in _all_users if u.email and u.email_verified}
+
+            logger.info(
+                '📊 [multi-tariff] Подписок с remnawave_id',
+                subs_count=len(subs_by_panel_id),
+                users_legacy_count=len(users_by_panel_id),
+                bot_users_by_tg=len(bot_users_by_tg),
+                bot_users_by_email=len(bot_users_by_email),
+            )
+
+            # Аккаунты без Telegram id и без почты бот не создавал — их не
+            # подтягиваем и не трогаем; считаем, чтобы пропуск был виден оператору.
+            foreign_accounts_count = 0
+
+            # Match and update
+            for panel_user in panel_users:
+                panel_user_id = _normalize_panel_user_id(panel_user.get('id'))
+                if panel_user_id is None:
+                    # В 3.0.0 числовой id обязателен: его отсутствие — нарушение
+                    # контракта панели, а не рядовой пропуск. Молча пропускать
+                    # такое нельзя, иначе весь синк отрапортует успех на нуле.
+                    logger.warning(
+                        '⚠️ [multi-tariff] Панельный пользователь без числового id — пропускаем',
+                        username=panel_user.get('username'),
+                        short_uuid=panel_user.get('shortUuid'),
+                    )
+                    stats['errors'] += 1
+                    continue
+
+                subscription = subs_by_panel_id.get(panel_user_id)
+                if not subscription:
+                    # Fallback: check if this panel id belongs to a user (legacy single-tariff)
+                    # and auto-link it to the user's best active subscription
+                    legacy_user = users_by_panel_id.get(panel_user_id)
+                    if legacy_user:
+                        user_subs = getattr(legacy_user, 'subscriptions', []) or []
+                        active = [s for s in user_subs if s.status in ('active', 'trial')]
+                        if active:
+                            non_daily = [s for s in active if not getattr(s, 'is_daily_tariff', False)]
+                            pool = non_daily or active
+                            best = max(pool, key=lambda s: s.days_left)
+                            if not best.remnawave_id:
+                                best.remnawave_id = panel_user_id
+                                subs_by_panel_id[panel_user_id] = best
+                                subscription = best
+                                logger.info(
+                                    '🔗 [multi-tariff] Привязан legacy панельный id к подписке',
+                                    panel_user_id=panel_user_id,
+                                    subscription_id=best.id,
+                                    user_id=legacy_user.id,
+                                )
+
+                grace_open = bool(subscription and subscription.id in open_grace_ids)
+                if grace_open:
+                    logger.debug(
+                        'Panel-to-bot multi sync masks grace-owned fields',
+                        subscription_id=subscription.id,
+                    )
+
+                if not subscription:
+                    # Try to match panel user to a bot user and create subscription
+                    _panel_tg = panel_user.get('telegramId')
+                    _panel_email = (panel_user.get('email') or '').lower().strip()
+                    _bot_user = None
+                    if _panel_tg:
+                        _bot_user = bot_users_by_tg.get(_panel_tg)
+                    if not _bot_user and _panel_email:
+                        _bot_user = bot_users_by_email.get(_panel_email)
+
+                    if not _bot_user:
+                        if not _panel_tg and not _panel_email:
+                            foreign_accounts_count += 1
+                        else:
+                            logger.debug(
+                                '⚠️ [multi-tariff] Panel user has no matching bot user',
+                                panel_user_id=panel_user_id,
+                                username=panel_user.get('username'),
+                            )
+                        continue
+
+                    # Check MAX_ACTIVE_SUBSCRIPTIONS
+                    _user_subs = getattr(_bot_user, 'subscriptions', []) or []
+                    _active_count = sum(1 for s in _user_subs if s.status in ('active', 'trial'))
+                    if _active_count >= settings.get_max_active_subscriptions():
+                        logger.debug(
+                            '⚠️ [multi-tariff] User at max subscriptions, skipping',
+                            user_id=_bot_user.id,
+                            active_count=_active_count,
+                        )
+                        continue
+
+                    # Check if subscription with this panel id already exists for this user
+                    if any(_normalize_panel_user_id(s.remnawave_id) == panel_user_id for s in _user_subs):
+                        continue
+
+                    try:
+                        from app.database.crud.subscription import generate_unique_short_id
+
+                        _expire_at = self._parse_remnawave_date(panel_user.get('expireAt', ''))
+                        _now = self._now_utc()
+                        _panel_status = panel_user.get('status', 'ACTIVE')
+                        if _panel_status == 'ACTIVE' and _expire_at > _now:
+                            _sub_status = SubscriptionStatus.ACTIVE
+                        elif _expire_at <= _now:
+                            _sub_status = SubscriptionStatus.EXPIRED
+                        else:
+                            _sub_status = SubscriptionStatus.DISABLED
+
+                        _traffic_limit_bytes = int(panel_user.get('trafficLimitBytes') or 0)  # 2.8.0: number→int
+                        _used_bytes = panel_user.get('usedTrafficBytes', 0) or 0
+                        _squads = panel_user.get('activeInternalSquads', []) or []
+                        _squad_uuids = []
+                        if isinstance(_squads, list):
+                            for _sq in _squads:
+                                if isinstance(_sq, dict) and 'uuid' in _sq:
+                                    _squad_uuids.append(_sq['uuid'])
+                                elif isinstance(_sq, str):
+                                    _squad_uuids.append(_sq)
+
+                        _short_id = await generate_unique_short_id(db)
+
+                        # Attempt to match tariff by allowed_squads
+                        _matched_tariff_id = None
+                        if _squad_uuids:
+                            try:
+                                from app.database.crud.tariff import get_all_active_tariffs
+
+                                _all_tariffs = await get_all_active_tariffs(db)
+                                for _t in _all_tariffs:
+                                    if _t.allowed_squads and set(_squad_uuids).issubset(set(_t.allowed_squads)):
+                                        _matched_tariff_id = _t.id
+                                        break
+                            except Exception:
+                                pass
+
+                        new_sub = Subscription(
+                            user_id=_bot_user.id,
+                            status=_sub_status.value,
+                            is_trial=False,
+                            end_date=_expire_at,
+                            traffic_limit_gb=_traffic_limit_bytes // (1024**3) if _traffic_limit_bytes > 0 else 0,
+                            traffic_used_gb=_used_bytes / (1024**3),
+                            device_limit=coerce_panel_device_limit(panel_user.get('hwidDeviceLimit')),
+                            connected_squads=_squad_uuids,
+                            remnawave_id=panel_user_id,
+                            remnawave_short_id=_short_id,
+                            remnawave_short_uuid=panel_user.get('shortUuid'),
+                            subscription_url=panel_user.get('subscriptionUrl', ''),
+                            subscription_crypto_link=panel_user.get('subscriptionCryptoLink', ''),
+                            tariff_id=_matched_tariff_id,
+                        )
+                        db.add(new_sub)
+                        subs_by_panel_id[panel_user_id] = new_sub
+                        # Keep in-memory state consistent for subsequent iterations
+                        if hasattr(_bot_user, 'subscriptions') and isinstance(_bot_user.subscriptions, list):
+                            _bot_user.subscriptions.append(new_sub)
+                        stats['created'] += 1
+                        logger.info(
+                            '✅ [multi-tariff] Создана подписка из панели',
+                            panel_user_id=panel_user_id,
+                            user_id=_bot_user.id,
+                        )
+                    except Exception as create_err:
+                        logger.error(
+                            '❌ [multi-tariff] Ошибка создания подписки из панели',
+                            panel_user_id=panel_user_id,
+                            error=create_err,
+                        )
+                        stats['errors'] += 1
+                    continue
+
+                try:
+                    # Полный проход выгружает весь список панели и применяет его
+                    # минутами позже, поэтому снимку нельзя верить на слово:
+                    # свежее webhook-обновление (оплата во время прохода) важнее.
+                    from app.database.crud.subscription import is_recently_updated_by_webhook
+
+                    project_onto_subscription(
+                        subscription,
+                        read_panel_user(panel_user),
+                        now=self._now_utc(),
+                        grace_open=grace_open,
+                        policy=BULK_SNAPSHOT,
+                        snapshot_taken_at=snapshot_taken_at,
+                        trust_status=not is_recently_updated_by_webhook(subscription),
+                    )
+
+                    stats['updated'] += 1
+                except Exception as e:
+                    logger.error(
+                        '❌ [multi-tariff] Ошибка обновления подписки',
+                        subscription_id=subscription.id,
+                        error=e,
+                    )
+                    stats['errors'] += 1
+
+            await db.commit()
+
+            if foreign_accounts_count > 0:
+                logger.info(
+                    '⏭️ [multi-tariff] Аккаунтов панели без Telegram ID и почты — созданы не ботом, пропускаем',
+                    foreign_accounts_count=foreign_accounts_count,
+                )
+
+            logger.info(
+                '🎯 [multi-tariff] Синхронизация завершена',
+                updated=stats['updated'],
+                errors=stats['errors'],
+            )
+            return stats
+
+        except Exception as e:
+            logger.error('❌ [multi-tariff] Критическая ошибка синхронизации', error=e)
+            await rollback_quietly(db)  # иначе следующий шаг синхронизации упадёт на этой сессии
+            return {'created': 0, 'updated': 0, 'errors': 1, 'deleted': 0}
+
+    async def _create_subscription_from_panel_data(self, db: AsyncSession, user, panel_user):
+        try:
+            from app.database.crud.subscription import create_subscription_no_commit
+            from app.database.models import SubscriptionStatus
+
+            expire_at_str = panel_user.get('expireAt', '')
+            expire_at = self._parse_remnawave_date(expire_at_str)
+
+            panel_status = panel_user.get('status', 'ACTIVE')
+            current_time = self._now_utc()
+
+            if panel_status == 'ACTIVE' and expire_at > current_time:
+                status = SubscriptionStatus.ACTIVE
+            elif expire_at <= current_time:
+                status = SubscriptionStatus.EXPIRED
+            else:
+                status = SubscriptionStatus.DISABLED
+
+            traffic_limit_bytes = int(panel_user.get('trafficLimitBytes') or 0)  # 2.8.0: number→int
+            traffic_limit_gb = traffic_limit_bytes // (1024**3) if traffic_limit_bytes > 0 else 0
+
+            used_traffic_bytes = _get_user_traffic_bytes(panel_user)
+            traffic_used_gb = used_traffic_bytes / (1024**3)
+
+            active_squads = panel_user.get('activeInternalSquads', [])
+            squad_uuids = []
+            if isinstance(active_squads, list):
+                for squad in active_squads:
+                    if isinstance(squad, dict) and 'uuid' in squad:
+                        squad_uuids.append(squad['uuid'])
+                    elif isinstance(squad, str):
+                        squad_uuids.append(squad)
+
+            subscription_data = {
+                'user_id': user.id,
+                'status': status.value,
+                'is_trial': False,
+                'end_date': expire_at,
+                'traffic_limit_gb': traffic_limit_gb,
+                'traffic_used_gb': traffic_used_gb,
+                'device_limit': coerce_panel_device_limit(panel_user.get('hwidDeviceLimit')),
+                'connected_squads': squad_uuids,
+                'remnawave_short_uuid': panel_user.get('shortUuid'),
+                'subscription_url': panel_user.get('subscriptionUrl', ''),
+                'subscription_crypto_link': (
+                    panel_user.get('subscriptionCryptoLink') or (panel_user.get('happ') or {}).get('cryptoLink', '')
+                ),
+            }
+
+            subscription = await create_subscription_no_commit(db, **subscription_data)
+            # Аккаунт панели — у подписки, а не только у пользователя: мультитариф и
+            # экраны по выбранной подписке (устройства, трафик) читают строго её id.
+            await link_subscription_panel_identity(db, subscription, _normalize_panel_user_id(panel_user.get('id')))
+            logger.info('✅ Подготовлена подписка для пользователя', telegram_id=user.telegram_id, expire_at=expire_at)
+
+        except Exception as e:
+            logger.error('❌ Ошибка создания подписки для пользователя', telegram_id=user.telegram_id, error=e)
+            try:
+                from app.database.crud.subscription import create_subscription_no_commit
+                from app.database.models import SubscriptionStatus
+
+                await create_subscription_no_commit(
+                    db=db,
+                    user_id=user.id,
+                    status=SubscriptionStatus.ACTIVE.value,
+                    is_trial=False,
+                    end_date=self._now_utc() + timedelta(days=30),
+                    traffic_limit_gb=0,
+                    traffic_used_gb=0.0,
+                    device_limit=1,
+                    connected_squads=[],
+                    remnawave_short_uuid=panel_user.get('shortUuid'),
+                    subscription_url=panel_user.get('subscriptionUrl', ''),
+                    subscription_crypto_link=(
+                        panel_user.get('subscriptionCryptoLink') or (panel_user.get('happ') or {}).get('cryptoLink', '')
+                    ),
+                )
+                logger.info('✅ Подготовлена базовая подписка для пользователя', telegram_id=user.telegram_id)
+            except Exception as basic_error:
+                logger.error('❌ Ошибка создания базовой подписки', basic_error=basic_error)
+
+    async def _update_subscription_from_panel_data(
+        self,
+        db: AsyncSession,
+        user,
+        panel_user,
+        *,
+        open_grace_ids: set[int] | None = None,
+        snapshot_taken_at: datetime | None = None,
+    ):
+        try:
+            from app.database.crud.subscription import get_subscription_by_user_id, is_recently_updated_by_webhook
+
+            # Всегда используем async CRUD запрос для получения подписки
+            if settings.is_multi_tariff_enabled():
+                from app.database.crud.subscription import get_active_subscriptions_by_user_id as _get_subs_upd
+
+                _subs_upd = await _get_subs_upd(db, user.id)
+                # Strict match by panel user id — never fallback to another subscription.
+                # Пустая идентичность не матчится ни при каких условиях: иначе
+                # состояние панельного пользователя записывалось бы на первый
+                # попавшийся непровиженный черновик (remnawave_id IS NULL).
+                _panel_id_upd = _normalize_panel_user_id(panel_user.get('id'))
+                subscription = (
+                    next(
+                        (s for s in _subs_upd if _normalize_panel_user_id(s.remnawave_id) == _panel_id_upd),
+                        None,
+                    )
+                    if _panel_id_upd is not None
+                    else None
+                )
+            else:
+                subscription = await get_subscription_by_user_id(db, user.id)
+
+            if not subscription:
+                await self._create_subscription_from_panel_data(db, user, panel_user)
+                return
+
+            if open_grace_ids is None:
+                from app.services.grace_access_runtime import get_open_grace_subscription_ids
+
+                open_grace_ids = await get_open_grace_subscription_ids(db)
+            grace_open = subscription.id in open_grace_ids
+            if grace_open:
+                logger.debug(
+                    'Panel-to-bot sync masks grace-owned fields',
+                    subscription_id=subscription.id,
+                )
+
+            # Skip if recently updated by webhook (prevent stale data overwrite)
+            if is_recently_updated_by_webhook(subscription):
+                logger.debug(
+                    'Пропуск синхронизации подписки : обновлена вебхуком недавно', subscription_id=subscription.id
+                )
+                return
+
+            # Тот же полный проход, что и в мультитарифе: список панели выгружен
+            # минутами раньше, поэтому снимку нельзя верить на слово, а всё, что
+            # изменилось в боте после снимка, он не трогает.
+            changed = project_onto_subscription(
+                subscription,
+                read_panel_user(panel_user),
+                now=self._now_utc(),
+                grace_open=grace_open,
+                policy=BULK_SNAPSHOT,
+                snapshot_taken_at=snapshot_taken_at,
+            )
+            # Старый импорт оставлял строку без id панели — привязываем при первом проходе.
+            await link_subscription_panel_identity(db, subscription, _normalize_panel_user_id(panel_user.get('id')))
+            if changed:
+                logger.debug(
+                    'Подписка обновлена из панели',
+                    subscription_id=subscription.id,
+                    telegram_id=getattr(user, 'telegram_id', None),
+                    fields=sorted(changed),
+                )
+
+            # Коммитим изменения позже, в основном цикле, чтобы уменьшить количество транзакций
+            logger.debug('✅ Обновлена подписка для пользователя', telegram_id=user.telegram_id)
+
+        except Exception as e:
+            logger.error('❌ Ошибка обновления подписки для пользователя', telegram_id=user.telegram_id, error=e)
+            # Не делаем rollback, так как это может повлиять на другие операции
+            # Ошибку прокидываем выше для корректной обработки в основном цикле
+            raise
+
+    async def sync_users_to_panel(self, db: AsyncSession) -> dict[str, int]:
+        """Отправить в панель все подписки бота («Из бота в панель»).
+
+        Механика прохода и запись каждой подписки живут в
+        ``app/services/panel_sync``: раньше здесь было триста строк со своей
+        сборкой запроса, своим поиском аккаунта и своей обработкой ошибок —
+        и каждое расхождение с кнопками кабинета всплывало отдельным багом.
+        """
+        try:
+            async with self.get_api_client() as api:
+                stats = await push_all_subscriptions(db, api)
+        except Exception as error:
+            await db.rollback()
+            logger.error('Ошибка синхронизации пользователей в панель', error=error)
+            return {'created': 0, 'updated': 0, 'errors': 1}
+
+        logger.info(
+            '✅ Синхронизация в панель завершена',
+            created=stats.created,
+            updated=stats.updated,
+            errors=stats.errors,
+            skipped=stats.skipped,
+        )
+        return stats.as_dict()
+
+    async def get_user_traffic_stats(self, telegram_id: int) -> dict[str, Any] | None:
+        try:
+            async with self.get_api_client() as api:
+                users = await api.find_users_by_telegram_id(telegram_id)
+
+                if not users:
+                    return None
+
+                user = users[0]
+
+                return {
+                    'used_traffic_bytes': user.used_traffic_bytes,
+                    'used_traffic_gb': user.used_traffic_bytes / (1024**3),
+                    'lifetime_used_traffic_bytes': user.lifetime_used_traffic_bytes,
+                    'lifetime_used_traffic_gb': user.lifetime_used_traffic_bytes / (1024**3),
+                    'traffic_limit_bytes': user.traffic_limit_bytes,
+                    'traffic_limit_gb': user.traffic_limit_bytes / (1024**3) if user.traffic_limit_bytes > 0 else 0,
+                    'subscription_url': user.subscription_url,
+                }
+
+        except Exception as e:
+            logger.error('Ошибка получения статистики трафика для пользователя', telegram_id=telegram_id, error=e)
+            return None
+
+    async def get_user_traffic_stats_by_panel_id(self, remnawave_id: int) -> dict[str, Any] | None:
+        """
+        Получить статистику трафика по числовому id пользователя RemnaWave.
+
+        Используется для email-пользователей у которых нет telegram_id.
+        """
+        try:
+            async with self.get_api_client() as api:
+                user = await api.get_user_by_id(remnawave_id)
+
+                if not user:
+                    return None
+
+                return {
+                    'used_traffic_bytes': user.used_traffic_bytes,
+                    'used_traffic_gb': user.used_traffic_bytes / (1024**3),
+                    'lifetime_used_traffic_bytes': user.lifetime_used_traffic_bytes,
+                    'lifetime_used_traffic_gb': user.lifetime_used_traffic_bytes / (1024**3),
+                    'traffic_limit_bytes': user.traffic_limit_bytes,
+                    'traffic_limit_gb': user.traffic_limit_bytes / (1024**3) if user.traffic_limit_bytes > 0 else 0,
+                    'subscription_url': user.subscription_url,
+                }
+
+        except Exception as e:
+            logger.error('Ошибка получения статистики трафика по панельному id', remnawave_id=remnawave_id, error=e)
+            return None
+
+    async def get_telegram_id_by_email(self, user_identifier: str) -> int | None:
+        """
+        Получить telegram_id пользователя по email или username из панели RemnaWave.
+
+        Args:
+            user_identifier: Email или username пользователя
+
+        Returns:
+            telegram_id если найден, иначе None
+        """
+        if not self.is_configured:
+            logger.warning('RemnaWave API не настроен для поиска пользователя')
+            return None
+
+        try:
+            async with self.get_api_client() as api:
+                # Сначала пробуем найти по username (часто username == email)
+                try:
+                    user = await api.get_user_by_username(user_identifier)
+                    if user and user.telegram_id:
+                        logger.info(
+                            'Найден пользователь по username telegram_id',
+                            user_identifier=user_identifier,
+                            telegram_id=user.telegram_id,
+                        )
+                        return user.telegram_id
+                except Exception as e:
+                    logger.debug('Пользователь не найден по username', user_identifier=user_identifier, error=e)
+
+                # Если не нашли по username, ищем по email среди всех пользователей (с пагинацией)
+                try:
+                    page_size = 500
+                    cursor: str | None = None
+                    while True:
+                        # 2.8.0: курсорная пагинация /api/users/stream (с ранним выходом по совпадению)
+                        page_response = await api.get_all_users_page_stream(cursor=cursor, size=page_size)
+                        users_list = page_response.get('users', [])
+
+                        for panel_user in users_list:
+                            panel_email = panel_user.email if hasattr(panel_user, 'email') else None
+                            if panel_email and panel_email.lower() == user_identifier.lower():
+                                panel_telegram_id = (
+                                    panel_user.telegram_id if hasattr(panel_user, 'telegram_id') else None
+                                )
+                                if panel_telegram_id:
+                                    logger.info(
+                                        'Найден пользователь по email telegram_id',
+                                        user_identifier=user_identifier,
+                                        panel_telegram_id=panel_telegram_id,
+                                    )
+                                    return panel_telegram_id
+
+                        if not page_response.get('hasMore') or not page_response.get('nextCursor'):
+                            break
+                        cursor = page_response['nextCursor']
+                except Exception as e:
+                    logger.warning('Ошибка поиска пользователя по email', user_identifier=user_identifier, error=e)
+
+                logger.warning('Пользователь с идентификатором не найден в панели', user_identifier=user_identifier)
+                return None
+
+        except Exception as e:
+            logger.error('Ошибка получения telegram_id по идентификатору', user_identifier=user_identifier, error=e)
+            return None
+
+    async def test_api_connection(self) -> dict[str, Any]:
+        if not self.is_configured:
+            return {
+                'status': 'not_configured',
+                'message': self.configuration_error or 'RemnaWave API не настроен',
+                'api_url': settings.REMNAWAVE_API_URL,
+            }
+        try:
+            async with self.get_api_client() as api:
+                system_stats = await api.get_system_stats()
+
+                return {
+                    'status': 'connected',
+                    'message': 'Подключение успешно',
+                    'api_url': settings.REMNAWAVE_API_URL,
+                    'system_info': system_stats,
+                }
+
+        except RemnaWaveAPIError as e:
+            return {
+                'status': 'error',
+                'message': f'Ошибка API: {e.message}',
+                'status_code': e.status_code,
+                'api_url': settings.REMNAWAVE_API_URL,
+            }
+        except RemnaWaveConfigurationError as e:
+            return {
+                'status': 'not_configured',
+                'message': str(e),
+                'api_url': settings.REMNAWAVE_API_URL,
+            }
+        except Exception as e:
+            return {'status': 'error', 'message': f'Ошибка подключения: {e!s}', 'api_url': settings.REMNAWAVE_API_URL}
+
+    async def get_nodes_realtime_usage(self) -> list[dict[str, Any]]:
+        try:
+            async with self.get_api_client() as api:
+                usage_data = await api.get_nodes_realtime_usage()
+                return usage_data
+
+        except Exception as e:
+            logger.error('Ошибка получения актуального использования нод', error=e)
+            return []
+
+    async def get_squad_details(self, squad_uuid: str) -> dict | None:
+        try:
+            async with self.get_api_client() as api:
+                squad = await api.get_internal_squad_by_uuid(squad_uuid)
+                if squad:
+                    inbounds = [
+                        asdict(inbound) if is_dataclass(inbound) else inbound for inbound in squad.inbounds or []
+                    ]
+                    return {
+                        'uuid': squad.uuid,
+                        'name': squad.name,
+                        'members_count': squad.members_count,
+                        'inbounds_count': squad.inbounds_count,
+                        'inbounds': inbounds,
+                    }
+                return None
+        except Exception as e:
+            logger.error('Error getting squad details', error=e)
+            return None
+
+    async def add_all_users_to_squad(self, squad_uuid: str) -> bool:
+        try:
+            from app.services.grace_access_runtime import grace_sensitive_global_panel_update
+
+            async with grace_sensitive_global_panel_update() as allowed:
+                if not allowed:
+                    logger.warning('Bulk squad add blocked while grace sessions are open')
+                    return False
+                async with self.get_api_client() as api:
+                    # 3.0.0: bulk-действие отвечает 202/204 без тела, поля
+                    # `eventSent` в контракте больше нет — успех определяется
+                    # отсутствием исключения (чтение поля рапортовало провал
+                    # на успешной операции).
+                    return await api.add_users_to_internal_squad(squad_uuid)
+        except Exception as e:
+            logger.error('Error adding users to squad', error=e)
+            return False
+
+    async def remove_all_users_from_squad(self, squad_uuid: str) -> bool:
+        try:
+            from app.services.grace_access_runtime import grace_sensitive_global_panel_update
+
+            async with grace_sensitive_global_panel_update() as allowed:
+                if not allowed:
+                    logger.warning('Bulk squad removal blocked while grace sessions are open')
+                    return False
+                async with self.get_api_client() as api:
+                    # 3.0.0: см. add_all_users_to_squad — тела у ответа нет.
+                    return await api.remove_users_from_internal_squad(squad_uuid)
+        except Exception as e:
+            logger.error('Error removing users from squad', error=e)
+            return False
+
+    async def get_all_inbounds(self) -> list[dict]:
+        try:
+            async with self.get_api_client() as api:
+                response = await api._make_request('GET', '/api/config-profiles/inbounds')
+                inbounds_data = response.get('response', {}).get('inbounds', [])
+
+                return [
+                    {
+                        'uuid': inbound['uuid'],
+                        'tag': inbound['tag'],
+                        'type': inbound['type'],
+                        'network': inbound.get('network'),
+                        'security': inbound.get('security'),
+                        'port': inbound.get('port'),
+                    }
+                    for inbound in inbounds_data
+                ]
+        except Exception as e:
+            logger.error('Error getting all inbounds', error=e)
+            return []
+
+    async def rename_squad(self, squad_uuid: str, new_name: str) -> bool:
+        try:
+            async with self.get_api_client() as api:
+                data = {'uuid': squad_uuid, 'name': new_name}
+                await api._make_request('PATCH', '/api/internal-squads', data)
+                return True
+        except Exception as e:
+            logger.error('Error renaming squad', error=e)
+            return False
+
+    async def get_node_user_usage_by_range(self, node_uuid: str, start_date, end_date) -> list[dict[str, Any]]:
+        """Трафик пользователей на ноде за период.
+
+        3.0.0 удалил `/api/bandwidth-stats/nodes/{uuid}/users/legacy`, который
+        отдавал строки `{userUuid, username, nodeUuid, total, date}` — по одной
+        на пользователя и день. Замена `POST /api/bandwidth-stats/nodes/usage`
+        сохраняет привязку трафика к пользователю (числовой `id`), но разбивки
+        по дням у неё нет: `date` в элементах больше не будет.
+        """
+        try:
+            async with self.get_api_client() as api:
+                # Эндпоинт валидирует start/end как дату (YYYY-MM-DD); полный ISO
+                # с `Z` панель отвергает (400) — как и в get_top_consumers.
+                start_str = start_date.date().isoformat()
+                end_str = end_date.date().isoformat()
+
+                usage_data = await api.get_bandwidth_stats_nodes_usage([node_uuid], start_str, end_str)
+
+                items: list[dict[str, Any]] = []
+                for node in usage_data.get('nodes', []) or []:
+                    _node_uuid = node.get('uuid') or node_uuid
+                    for user in node.get('users', []) or []:
+                        items.append(
+                            {
+                                'userId': user.get('id'),
+                                'nodeUuid': _node_uuid,
+                                'total': user.get('totalBytes', 0) or 0,
+                            }
+                        )
+                return items
+
+        except Exception as e:
+            logger.error('Ошибка получения статистики использования ноды', node_uuid=node_uuid, error=e)
+            return []
+
+    async def get_node_statistics(self, node_uuid: str) -> dict[str, Any] | None:
+        try:
+            node = await self.get_node_details(node_uuid)
+            if not node:
+                return None
+
+            realtime_stats = await self.get_nodes_realtime_usage()
+
+            node_realtime = None
+            for stats in realtime_stats:
+                if stats.get('nodeUuid') == node_uuid:
+                    node_realtime = stats
+                    break
+
+            end_date = datetime.now(UTC)
+            start_date = end_date - timedelta(days=7)
+
+            usage_history = await self.get_node_user_usage_by_range(node_uuid, start_date, end_date)
+
+            return {
+                'node': node,
+                'realtime': node_realtime,
+                'usage_history': usage_history,
+                'last_updated': datetime.now(UTC).isoformat(),
+            }
+
+        except Exception as e:
+            logger.error('Ошибка получения статистики ноды', node_uuid=node_uuid, error=e)
+
+    async def force_cleanup_user_data(self, db: AsyncSession, user: User) -> bool:
+        """
+        ОПАСНАЯ ФУНКЦИЯ: Полностью сбрасывает данные подписки пользователя.
+        Баланс и has_had_paid_subscription СОХРАНЯЮТСЯ (оплаченные средства).
+        Используйте только для полной очистки пользователя.
+        """
+        try:
+            # Предупреждение для платных пользователей
+            user_subscriptions = getattr(user, 'subscriptions', None) or []
+            was_paid = (
+                user.has_had_paid_subscription
+                or any(not sub.is_trial for sub in user_subscriptions)
+                or user.balance_kopeks > 0
+            )
+            user_id_display = user.telegram_id or user.email or f'#{user.id}'
+            if was_paid:
+                logger.warning(
+                    '⚠️ ВНИМАНИЕ: force_cleanup_user_data вызвана для ПЛАТНОГО пользователя',
+                    user_id_display=user_id_display,
+                    has_had_paid_subscription=user.has_had_paid_subscription,
+                    balance_kopeks=user.balance_kopeks,
+                    is_trial=[sub.is_trial for sub in user_subscriptions] if user_subscriptions else 'N/A',
+                )
+
+            logger.info('🗑️ ПРИНУДИТЕЛЬНАЯ полная очистка данных пользователя', user_id_display=user_id_display)
+
+            # Reset devices for all subscription panel ids in multi-tariff, or user panel id in single-tariff
+            _panel_ids_to_reset = set()
+            if settings.is_multi_tariff_enabled():
+                user_subs = getattr(user, 'subscriptions', []) or []
+                for sub in user_subs:
+                    _sub_panel_id = _normalize_panel_user_id(getattr(sub, 'remnawave_id', None))
+                    if _sub_panel_id is not None:
+                        _panel_ids_to_reset.add(_sub_panel_id)
+            if not _panel_ids_to_reset:
+                _user_panel_id = _normalize_panel_user_id(user.remnawave_id)
+                if _user_panel_id is not None:
+                    _panel_ids_to_reset.add(_user_panel_id)
+
+            for _panel_user_id in _panel_ids_to_reset:
+                try:
+                    async with self.get_api_client() as api:
+                        # reset_user_devices ловит отказ панели внутри и отдаёт
+                        # False — `except` ниже для этого случая уже недостижим,
+                        # и без проверки результата провал сброса не оставил бы
+                        # здесь ни одной записи в логе.
+                        if not await api.reset_user_devices(_panel_user_id):
+                            logger.error('Failed to reset devices for panel user', panel_user_id=_panel_user_id)
+                except Exception as e:
+                    logger.warning('Failed to reset devices for panel user', panel_user_id=_panel_user_id, error=e)
+
+            try:
+                from sqlalchemy import delete
+
+                from app.database.models import (
+                    ReferralEarning,
+                    SubscriptionServer,
+                    SubscriptionStatus,
+                    Transaction,
+                )
+
+                for sub in user_subscriptions:
+                    await decrement_subscription_server_counts(db, sub)
+
+                    await db.execute(delete(SubscriptionServer).where(SubscriptionServer.subscription_id == sub.id))
+                if user_subscriptions:
+                    logger.info('🗑️ Удалены серверы подписок пользователя', user_id_display=user_id_display)
+
+                await db.execute(delete(Transaction).where(Transaction.user_id == user.id))
+                logger.info('🗑️ Удалены транзакции пользователя', user_id_display=user_id_display)
+
+                await db.execute(delete(ReferralEarning).where(ReferralEarning.user_id == user.id))
+                await db.execute(delete(ReferralEarning).where(ReferralEarning.referral_id == user.id))
+                logger.info('🗑️ Удалены реферальные доходы пользователя', user_id_display=user_id_display)
+
+                # PromoCodeUse НЕ удаляем — история промокодов постоянна,
+                # иначе пользователь может повторно активировать промокоды
+
+            except Exception as records_error:
+                logger.error('❌ Ошибка удаления связанных записей', records_error=records_error)
+
+            try:
+                if user.balance_kopeks > 0:
+                    logger.warning(
+                        '⚠️ force_cleanup: СОХРАНЯЕМ баланс пользователя (оплаченные средства)',
+                        user_id_display=user_id_display,
+                        balance_kopeks=user.balance_kopeks,
+                    )
+                user.remnawave_id = None
+                # force_cleanup удаляет панельного пользователя целиком, поэтому
+                # исторический uuid тоже теряет смысл: пара «мёртвый uuid + новый
+                # id» отравляет карту идентичностей бэкфила.
+                user.remnawave_uuid = None
+                user.updated_at = self._now_utc()
+
+                for sub in user_subscriptions:
+                    sub.status = SubscriptionStatus.DISABLED.value
+                    sub.is_trial = True
+                    sub.end_date = self._now_utc()
+                    sub.traffic_limit_gb = 0
+                    sub.traffic_used_gb = 0.0
+                    sub.device_limit = 1
+                    sub.connected_squads = []
+                    sub.autopay_enabled = False
+                    sub.autopay_days_before = settings.DEFAULT_AUTOPAY_DAYS_BEFORE
+                    sub.remnawave_short_uuid = None
+                    sub.subscription_url = ''
+                    sub.subscription_crypto_link = ''
+                    sub.updated_at = self._now_utc()
+
+                await db.commit()
+
+                logger.info('✅ ПРИНУДИТЕЛЬНО очищены ВСЕ данные пользователя', user_id_display=user_id_display)
+                return True
+
+            except Exception as cleanup_error:
+                logger.error('❌ Ошибка финальной очистки пользователя', cleanup_error=cleanup_error)
+                await db.rollback()
+                return False
+
+        except Exception as e:
+            logger.error(
+                '❌ Критическая ошибка принудительной очистки пользователя', telegram_id=user.telegram_id, error=e
+            )
+            await db.rollback()
+            return False
+
+    async def _load_all_panel_users(self) -> list[dict[str, Any]]:
+        """Полный ростер панели через курсорную пагинацию.
+
+        `GET /api/users` без параметров отдаёт лишь первую страницу (дефолт
+        size=25). Вызывающие здесь считают ответ ПОЛНЫМ списком и зачищают всех,
+        кого в нём нет, — то есть без пагинации сносят всех, кроме первых 25.
+        """
+        panel_users: list[dict[str, Any]] = []
+
+        async with self.get_api_client() as api:
+            cursor: str | None = None
+            size = 500
+
+            while True:
+                page = await api.get_all_users_page_stream(cursor=cursor, size=size, enrich_happ_links=False)
+
+                for user_obj in page['users']:
+                    panel_users.append(
+                        {
+                            'id': user_obj.id,
+                            'shortUuid': user_obj.short_uuid,
+                            'username': user_obj.username,
+                            'status': user_obj.status.value,
+                            'telegramId': user_obj.telegram_id,
+                            'email': user_obj.email,
+                            'expireAt': user_obj.expire_at.isoformat(),
+                            'trafficLimitBytes': user_obj.traffic_limit_bytes,
+                            'usedTrafficBytes': user_obj.used_traffic_bytes,
+                            'hwidDeviceLimit': user_obj.hwid_device_limit,
+                            'subscriptionUrl': user_obj.subscription_url,
+                            'subscriptionCryptoLink': user_obj.happ_crypto_link,
+                            'activeInternalSquads': user_obj.active_internal_squads,
+                        }
+                    )
+
+                if not page['hasMore'] or not page['nextCursor']:
+                    break
+
+                cursor = page['nextCursor']
+
+        return panel_users
+
+    async def cleanup_orphaned_subscriptions(self, db: AsyncSession) -> dict[str, int]:
+        try:
+            stats = {'deactivated': 0, 'errors': 0, 'checked': 0}
+
+            logger.info('🧹 Начинаем усиленную очистку неактуальных подписок...')
+
+            panel_users = await self._load_all_panel_users()
+
+            panel_telegram_ids = set()
+            for panel_user in panel_users:
+                telegram_id = panel_user.get('telegramId')
+                if telegram_id:
+                    panel_telegram_ids.add(telegram_id)
+
+            logger.info(
+                '📊 Найдено пользователей в панели',
+                panel_users_count=len(panel_users),
+                panel_telegram_ids_count=len(panel_telegram_ids),
+            )
+
+            from app.database.crud.subscription import get_all_subscriptions
+            from app.database.models import SubscriptionStatus
+
+            page = 1
+            limit = 100
+
+            while True:
+                subscriptions, total_count = await get_all_subscriptions(db, page, limit)
+
+                if not subscriptions:
+                    break
+
+                for subscription in subscriptions:
+                    try:
+                        stats['checked'] += 1
+                        user = subscription.user
+
+                        if subscription.status in (
+                            SubscriptionStatus.DISABLED.value,
+                            SubscriptionStatus.LIMITED.value,
+                        ):
+                            continue
+
+                        # Email-only users have no telegram_id — cannot be matched by panel_telegram_ids
+                        if not user.telegram_id:
+                            continue
+
+                        if user.telegram_id not in panel_telegram_ids:
+                            logger.info(
+                                '🗑️ ПОЛНАЯ деактивация подписки пользователя (отсутствует в панели)',
+                                telegram_id=user.telegram_id,
+                            )
+
+                            cleanup_success = await self.force_cleanup_user_data(db, user)
+
+                            if cleanup_success:
+                                stats['deactivated'] += 1
+                            else:
+                                stats['errors'] += 1
+
+                    except Exception as sub_error:
+                        logger.error(
+                            '❌ Ошибка обработки подписки', subscription_id=subscription.id, sub_error=sub_error
+                        )
+                        stats['errors'] += 1
+
+                page += 1
+                if len(subscriptions) < limit:
+                    break
+
+            logger.info(
+                '🧹 Усиленная очистка завершена',
+                stats=stats['checked'],
+                stats_2=stats['deactivated'],
+                stats_3=stats['errors'],
+            )
+            return stats
+
+        except Exception as e:
+            logger.error('❌ Критическая ошибка усиленной очистки подписок', error=e)
+            return {'deactivated': 0, 'errors': 1, 'checked': 0}
+
+    async def sync_subscription_statuses(self, db: AsyncSession) -> dict[str, int]:
+        try:
+            stats = {'updated': 0, 'errors': 0, 'checked': 0}
+
+            logger.info('🔄 Начинаем синхронизацию статусов подписок...')
+
+            panel_users = await self._load_all_panel_users()
+
+            panel_users_dict = {}
+            for panel_user in panel_users:
+                telegram_id = panel_user.get('telegramId')
+                if telegram_id:
+                    panel_users_dict[telegram_id] = panel_user
+
+            logger.info(
+                '📊 Найдено пользователей в панели для синхронизации',
+                panel_users_count=len(panel_users),
+                panel_users_dict_count=len(panel_users_dict),
+            )
+
+            from app.database.crud.subscription import get_all_subscriptions
+            from app.database.models import SubscriptionStatus
+
+            page = 1
+            limit = 100
+
+            while True:
+                subscriptions, total_count = await get_all_subscriptions(db, page, limit)
+
+                if not subscriptions:
+                    break
+
+                for subscription in subscriptions:
+                    try:
+                        stats['checked'] += 1
+                        user = subscription.user
+
+                        # Skip email-only users (no telegram_id for panel lookup)
+                        if not user.telegram_id:
+                            logger.debug('Пропускаем email-пользователя при синхронизации с панелью', user_id=user.id)
+                            continue
+
+                        panel_user = panel_users_dict.get(user.telegram_id)
+
+                        if panel_user:
+                            await self._update_subscription_from_panel_data(db, user, panel_user)
+                            stats['updated'] += 1
+                        elif subscription.status != SubscriptionStatus.DISABLED.value:
+                            from app.database.crud.subscription import (
+                                deactivate_subscription,
+                                is_recently_updated_by_webhook,
+                            )
+
+                            if is_recently_updated_by_webhook(subscription):
+                                logger.debug(
+                                    'Пропуск деактивации подписки : обновлена вебхуком недавно',
+                                    subscription_id=subscription.id,
+                                )
+                            else:
+                                logger.info(
+                                    '🗑️ Деактивируем подписку пользователя (нет в панели)', telegram_id=user.telegram_id
+                                )
+                                await deactivate_subscription(db, subscription)
+                                stats['updated'] += 1
+
+                    except Exception as sub_error:
+                        logger.error(
+                            '❌ Ошибка синхронизации подписки', subscription_id=subscription.id, sub_error=sub_error
+                        )
+                        stats['errors'] += 1
+
+                page += 1
+                if len(subscriptions) < limit:
+                    break
+
+            logger.info(
+                '🔄 Синхронизация статусов завершена',
+                stats=stats['checked'],
+                stats_2=stats['updated'],
+                stats_3=stats['errors'],
+            )
+            return stats
+
+        except Exception as e:
+            logger.error('❌ Критическая ошибка синхронизации статусов', error=e)
+            return {'updated': 0, 'errors': 1, 'checked': 0}
+
+    async def validate_and_fix_subscriptions(self, db: AsyncSession) -> dict[str, int]:
+        try:
+            stats = {'fixed': 0, 'errors': 0, 'checked': 0, 'issues_found': 0}
+
+            logger.info('🔍 Начинаем валидацию подписок...')
+
+            from app.database.crud.subscription import get_all_subscriptions
+            from app.database.models import SubscriptionStatus
+
+            page = 1
+            limit = 100
+
+            while True:
+                subscriptions, total_count = await get_all_subscriptions(db, page, limit)
+
+                if not subscriptions:
+                    break
+
+                for subscription in subscriptions:
+                    try:
+                        stats['checked'] += 1
+                        user = subscription.user
+                        issues_fixed = 0
+
+                        from app.database.crud.subscription import is_recently_updated_by_webhook
+
+                        current_time = self._now_utc()
+                        # Конвертируем end_date в UTC для корректного сравнения
+                        end_date_utc = self._local_to_utc(subscription.end_date)
+                        # Добавляем буфер 5 минут для защиты от race condition при продлении
+                        expiry_buffer = timedelta(minutes=5)
+
+                        # Суточные подписки управляются DailySubscriptionService — не экспайрим
+                        tariff = getattr(subscription, 'tariff', None)
+                        is_active_daily = (
+                            tariff is not None
+                            and getattr(tariff, 'is_daily', False)
+                            and not getattr(subscription, 'is_daily_paused', False)
+                        )
+
+                        if (
+                            end_date_utc + expiry_buffer <= current_time
+                            and subscription.status == SubscriptionStatus.ACTIVE.value
+                            and not is_recently_updated_by_webhook(subscription)
+                            and not is_active_daily
+                        ):
+                            time_since_expiry = current_time - end_date_utc
+                            logger.warning(
+                                '🔧 fix_data_issues: деактивируем просроченную подписку',
+                                subscription_id=subscription.id,
+                                telegram_id=user.telegram_id,
+                                time_since_expiry=time_since_expiry,
+                            )
+                            subscription.status = SubscriptionStatus.EXPIRED.value
+                            issues_fixed += 1
+
+                        _lookup_panel_id = (
+                            getattr(subscription, 'remnawave_id', None) if settings.is_multi_tariff_enabled() else None
+                        ) or getattr(user, 'remnawave_id', None)
+                        if not subscription.remnawave_short_uuid and _lookup_panel_id:
+                            try:
+                                async with self.get_api_client() as api:
+                                    rw_user = await api.get_user_by_id(_lookup_panel_id)
+                                    if rw_user:
+                                        subscription.remnawave_short_uuid = rw_user.short_uuid
+                                        subscription.subscription_url = rw_user.subscription_url
+                                        subscription.subscription_crypto_link = rw_user.happ_crypto_link
+                                        logger.info(
+                                            '🔧 Восстановлены данные Remnawave для пользователя',
+                                            telegram_id=user.telegram_id,
+                                        )
+                                        issues_fixed += 1
+                            except Exception as rw_error:
+                                logger.warning(
+                                    '⚠️ Не удалось получить данные Remnawave для пользователя',
+                                    telegram_id=user.telegram_id,
+                                    rw_error=rw_error,
+                                )
+
+                        if subscription.traffic_limit_gb < 0:
+                            subscription.traffic_limit_gb = 0
+                            logger.info(
+                                '🔧 Исправлен некорректный лимит трафика для пользователя', telegram_id=user.telegram_id
+                            )
+                            issues_fixed += 1
+
+                        if subscription.traffic_used_gb < 0:
+                            subscription.traffic_used_gb = 0.0
+                            logger.info(
+                                '🔧 Исправлено некорректное использование трафика для пользователя',
+                                telegram_id=user.telegram_id,
+                            )
+                            issues_fixed += 1
+
+                        if device_limit_needs_heal(subscription.device_limit):
+                            subscription.device_limit = 1
+                            logger.info('🔧 Исправлен лимит устройств для пользователя', telegram_id=user.telegram_id)
+                            issues_fixed += 1
+
+                        if subscription.connected_squads is None:
+                            subscription.connected_squads = []
+                            logger.info(
+                                '🔧 Инициализирован список сквадов для пользователя', telegram_id=user.telegram_id
+                            )
+                            issues_fixed += 1
+
+                        if issues_fixed > 0:
+                            stats['issues_found'] += issues_fixed
+                            stats['fixed'] += 1
+                            await db.commit()
+
+                    except Exception as sub_error:
+                        logger.error(
+                            '❌ Ошибка валидации подписки', subscription_id=subscription.id, sub_error=sub_error
+                        )
+                        stats['errors'] += 1
+                        await db.rollback()
+
+                page += 1
+                if len(subscriptions) < limit:
+                    break
+
+            logger.info(
+                '🔍 Валидация завершена',
+                stats=stats['checked'],
+                stats_2=stats['fixed'],
+                stats_3=stats['issues_found'],
+                stats_4=stats['errors'],
+            )
+            return stats
+
+        except Exception as e:
+            logger.error('❌ Критическая ошибка валидации', error=e)
+            return {'fixed': 0, 'errors': 1, 'checked': 0, 'issues_found': 0}
+
+    async def get_sync_recommendations(self, db: AsyncSession) -> dict[str, Any]:
+        try:
+            recommendations = {
+                'should_sync': False,
+                'sync_type': 'none',
+                'reasons': [],
+                'priority': 'low',
+                'estimated_time': '1-2 минуты',
+            }
+
+            from app.database.crud.user import get_users_list
+
+            bot_users = await get_users_list(db, offset=0, limit=10000)
+
+            users_without_panel_id = sum(
+                1
+                for user in bot_users
+                if not user.remnawave_id and any(True for _ in (getattr(user, 'subscriptions', None) or []))
+            )
+
+            from app.database.crud.subscription import get_expired_subscriptions
+
+            expired_subscriptions = await get_expired_subscriptions(db)
+            active_expired = sum(1 for sub in expired_subscriptions if sub.status == 'active')
+
+            if users_without_panel_id > 10:
+                recommendations['should_sync'] = True
+                recommendations['sync_type'] = 'all'
+                recommendations['priority'] = 'high'
+                recommendations['reasons'].append(
+                    f'Найдено {users_without_panel_id} пользователей без связи с Remnawave'
+                )
+                recommendations['estimated_time'] = '3-5 минут'
+
+            if active_expired > 5:
+                recommendations['should_sync'] = True
+                if recommendations['sync_type'] == 'none':
+                    recommendations['sync_type'] = 'update_only'
+                recommendations['priority'] = (
+                    'medium' if recommendations['priority'] == 'low' else recommendations['priority']
+                )
+                recommendations['reasons'].append(f'Найдено {active_expired} активных подписок с истекшим сроком')
+
+            if not recommendations['should_sync']:
+                recommendations['sync_type'] = 'update_only'
+                recommendations['reasons'].append('Рекомендуется регулярная синхронизация данных')
+                recommendations['estimated_time'] = '1-2 минуты'
+
+            return recommendations
+
+        except Exception as e:
+            logger.error('❌ Ошибка получения рекомендаций', error=e)
+            return {
+                'should_sync': True,
+                'sync_type': 'all',
+                'reasons': ['Ошибка анализа - рекомендуется полная синхронизация'],
+                'priority': 'medium',
+                'estimated_time': '3-5 минут',
+            }
+
+    async def monitor_panel_status(self, bot) -> dict[str, Any]:
+        try:
+            from app.utils.cache import cache
+
+            previous_status = await cache.get('remnawave_panel_status') or 'unknown'
+
+            status_result = await self.check_panel_health()
+            current_status = status_result.get('status', 'offline')
+
+            if current_status != previous_status and previous_status != 'unknown':
+                await self._send_status_change_notification(bot, previous_status, current_status, status_result)
+
+            await cache.set('remnawave_panel_status', current_status, expire=300)
+
+            return status_result
+
+        except Exception as e:
+            logger.error('Ошибка мониторинга статуса панели Remnawave', error=e)
+            return {'status': 'error', 'error': str(e)}
+
+    async def _send_status_change_notification(
+        self, bot, old_status: str, new_status: str, status_data: dict[str, Any]
+    ):
+        try:
+            from app.services.admin_notification_service import AdminNotificationService
+
+            notification_service = AdminNotificationService(bot)
+
+            details = {
+                'api_url': status_data.get('api_url'),
+                'response_time': status_data.get('response_time'),
+                'last_check': status_data.get('last_check'),
+                'users_online': status_data.get('users_online'),
+                'nodes_online': status_data.get('nodes_online'),
+                'total_nodes': status_data.get('total_nodes'),
+                'old_status': old_status,
+            }
+
+            if new_status == 'offline':
+                details['error'] = status_data.get('api_error')
+            elif new_status == 'degraded':
+                issues = []
+                if status_data.get('response_time', 0) > 10:
+                    issues.append(f'Медленный отклик API ({status_data.get("response_time")}с)')
+                if status_data.get('nodes_health') == 'unhealthy':
+                    issues.append(
+                        f'Проблемы с нодами ({status_data.get("nodes_online")}/{status_data.get("total_nodes")} онлайн)'
+                    )
+                details['issues'] = issues
+
+            await notification_service.send_remnawave_panel_status_notification(new_status, details)
+
+            logger.info(
+                'Отправлено уведомление об изменении статуса панели', old_status=old_status, new_status=new_status
+            )
+
+        except Exception as e:
+            logger.error('Ошибка отправки уведомления об изменении статуса', error=e)
+
+    async def send_manual_status_notification(self, bot, status: str, message: str = ''):
+        try:
+            from app.services.admin_notification_service import AdminNotificationService
+
+            notification_service = AdminNotificationService(bot)
+
+            details = {
+                'api_url': settings.REMNAWAVE_API_URL,
+                'last_check': datetime.now(UTC),
+                'manual_message': message,
+            }
+
+            if status == 'maintenance':
+                details['maintenance_reason'] = message or 'Плановое обслуживание'
+
+            await notification_service.send_remnawave_panel_status_notification(status, details)
+
+            logger.info('Отправлено ручное уведомление о статусе панели', status=status)
+            return True
+
+        except Exception as e:
+            logger.error('Ошибка отправки ручного уведомления', error=e)
+            return False
+
+    async def get_panel_status_summary(self) -> dict[str, Any]:
+        try:
+            status_data = await self.check_panel_health()
+
+            status_descriptions = {
+                'online': '🟢 Панель работает нормально',
+                'offline': '🔴 Панель недоступна',
+                'degraded': '🟡 Панель работает со сбоями',
+                'maintenance': '🔧 Панель на обслуживании',
+            }
+
+            status = status_data.get('status', 'offline')
+
+            summary = {
+                'status': status,
+                'description': status_descriptions.get(status, '❓ Статус неизвестен'),
+                'response_time': status_data.get('response_time', 0),
+                'api_available': status_data.get('api_available', False),
+                'nodes_status': f'{status_data.get("nodes_online", 0)}/{status_data.get("total_nodes", 0)} нод онлайн',
+                'users_online': status_data.get('users_online', 0),
+                'last_check': status_data.get('last_check'),
+                'has_issues': status in ['offline', 'degraded'],
+            }
+
+            if status == 'offline':
+                summary['recommendation'] = 'Проверьте подключение к серверу и работоспособность панели'
+            elif status == 'degraded':
+                summary['recommendation'] = 'Рекомендуется проверить состояние нод и производительность сервера'
+            else:
+                summary['recommendation'] = 'Все системы работают нормально'
+
+            return summary
+
+        except Exception as e:
+            logger.error('Ошибка получения сводки статуса панели', error=e)
+            return {
+                'status': 'error',
+                'description': '❌ Ошибка проверки статуса',
+                'response_time': 0,
+                'api_available': False,
+                'nodes_status': 'неизвестно',
+                'users_online': 0,
+                'last_check': datetime.now(UTC),
+                'has_issues': True,
+                'recommendation': 'Обратитесь к системному администратору',
+                'error': str(e),
+            }
+
+    async def check_panel_health(self) -> dict[str, Any]:
+        attempts = settings.get_maintenance_retry_attempts()
+        attempts = max(1, attempts)
+
+        last_result: dict[str, Any] | None = None
+        last_error: Exception | None = None
+
+        for attempt in range(1, attempts + 1):
+            try:
+                start_time = datetime.now(UTC)
+
+                async with self.get_api_client() as api:
+                    try:
+                        system_stats = await api.get_system_stats()
+                        api_available = True
+                        api_error = None
+                    except Exception as e:
+                        api_available = False
+                        api_error = str(e)
+                        system_stats = {}
+
+                    try:
+                        nodes = await api.get_all_nodes()
+                        nodes_online = sum(1 for node in nodes if node.is_connected and node.is_node_online)
+                        total_nodes = len(nodes)
+                        nodes_health = 'healthy' if nodes_online > 0 else 'unhealthy'
+                    except Exception:
+                        nodes_online = 0
+                        total_nodes = 0
+                        nodes_health = 'unknown'
+
+                    end_time = datetime.now(UTC)
+                    response_time = (end_time - start_time).total_seconds()
+
+                    if not api_available:
+                        status = 'offline'
+                    elif response_time > 10 or nodes_health == 'unhealthy':
+                        status = 'degraded'
+                    else:
+                        status = 'online'
+
+                    result = {
+                        'status': status,
+                        'api_available': api_available,
+                        'api_error': api_error,
+                        'response_time': round(response_time, 2),
+                        'nodes_online': nodes_online,
+                        'total_nodes': total_nodes,
+                        'nodes_health': nodes_health,
+                        'users_online': system_stats.get('onlineStats', {}).get('onlineNow', 0),
+                        'total_users': system_stats.get('users', {}).get('totalUsers', 0),
+                        'last_check': end_time,
+                        'api_url': settings.REMNAWAVE_API_URL,
+                        'attempts_used': attempt,
+                    }
+
+                if result['api_available']:
+                    if attempt > 1:
+                        logger.info('Панель Remnawave ответила с попытки', attempt=attempt)
+                    return result
+
+                last_result = result
+
+                if attempt < attempts:
+                    logger.warning(
+                        'Панель Remnawave недоступна (попытка /)',
+                        attempt=attempt,
+                        attempts=attempts,
+                        result=result.get('api_error') or 'неизвестная ошибка',
+                    )
+                    await asyncio.sleep(1)
+
+            except Exception as error:
+                last_error = error
+                if attempt < attempts:
+                    logger.warning(
+                        'Ошибка проверки здоровья панели (попытка /)', attempt=attempt, attempts=attempts, error=error
+                    )
+                    await asyncio.sleep(1)
+                    continue
+
+                logger.error('Ошибка проверки здоровья панели', error=error)
+
+        if last_result is not None:
+            return last_result
+
+        error_message = str(last_error) if last_error else 'Неизвестная ошибка'
+        return {
+            'status': 'offline',
+            'api_available': False,
+            'api_error': error_message,
+            'response_time': 0,
+            'nodes_online': 0,
+            'total_nodes': 0,
+            'nodes_health': 'unknown',
+            'last_check': datetime.now(UTC),
+            'api_url': settings.REMNAWAVE_API_URL,
+            'attempts_used': attempts,
+        }
+
+
+# Singleton instance for backward compatibility
+remnawave_service = RemnaWaveService()

@@ -1,0 +1,2389 @@
+import hashlib
+import json
+import os
+from dataclasses import dataclass
+from typing import Any, ClassVar, Optional, Union, get_args, get_origin
+
+import structlog
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.config import (
+    ENV_OVERRIDE_KEYS,
+    Settings,
+    clear_db_period_prices,
+    refresh_classic_period_prices,
+    refresh_period_prices,
+    refresh_traffic_prices,
+    settings,
+)
+from app.database.crud.system_setting import (
+    delete_system_setting,
+    upsert_system_setting,
+)
+from app.database.database import AsyncSessionLocal
+from app.database.models import SystemSetting
+from app.services.web_api_token_service import ensure_default_web_api_token
+
+
+logger = structlog.get_logger(__name__)
+
+
+def _title_from_key(key: str) -> str:
+    parts = key.split('_')
+    if not parts:
+        return key
+    return ' '.join(part.capitalize() for part in parts)
+
+
+def _truncate(value: str, max_len: int = 60) -> str:
+    value = value.strip()
+    if len(value) <= max_len:
+        return value
+    return value[: max_len - 1] + '…'
+
+
+@dataclass(slots=True)
+class SettingDefinition:
+    key: str
+    category_key: str
+    category_label: str
+    python_type: type[Any]
+    type_label: str
+    is_optional: bool
+
+    @property
+    def display_name(self) -> str:
+        return _title_from_key(self.key)
+
+
+@dataclass(slots=True)
+class ChoiceOption:
+    value: Any
+    label: str
+    description: str | None = None
+
+
+class ReadOnlySettingError(RuntimeError):
+    """Исключение, выбрасываемое при попытке изменить настройку только для чтения."""
+
+
+class BotConfigurationService:
+    # Ключи, удалённые в ходе миграций. Строки в system_settings остаются, но
+    # больше ни на что не влияют — молчать об этом нельзя.
+    _RETIRED_SETTINGS: ClassVar[dict[str, str]] = {
+        'TRAFFIC_EXCLUDED_USER_UUIDS': 'TRAFFIC_EXCLUDED_USER_IDS (значения — числовые id панели, не UUID)',
+    }
+
+    # SECURITY: keys that must NEVER be editable through the settings API. Beyond
+    # the bot token, this covers admin IDENTITY and core AUTH secrets — a
+    # delegated admin holding only `settings:edit` could otherwise add their own
+    # email to ADMIN_EMAILS and become a full superadmin, or overwrite the JWT /
+    # web-api / webhook secrets to forge sessions and requests. Payment-provider
+    # secrets are intentionally NOT here: operators configure those via the UI.
+    EXCLUDED_KEYS: set[str] = {
+        'BOT_TOKEN',
+        'ADMIN_IDS',
+        'ADMIN_EMAILS',
+        'CABINET_JWT_SECRET',
+        'WEB_API_DEFAULT_TOKEN',
+        'WEB_API_TOKEN_HMAC_SECRET',
+        'WEBHOOK_SECRET_TOKEN',
+    }
+
+    READ_ONLY_KEYS: set[str] = set()
+    PLAIN_TEXT_KEYS: set[str] = set()
+
+    # Placeholder returned to clients in place of a secret's real value. When this
+    # exact sentinel comes back on an update, the write is skipped so the stored
+    # secret is preserved (the admin left the masked field untouched).
+    SECRET_MASK: str = '••••••••'
+
+    @classmethod
+    def is_secret_key(cls, key: str) -> bool:
+        """True if a setting holds a secret whose value must never be echoed to clients.
+
+        Mirrors the masking heuristic used by ``format_value`` for the bot UI so the
+        REST settings API (cabinet + web API) never returns plaintext payment keys,
+        SMTP/panel passwords, API tokens, etc.
+        """
+        if key in cls.PLAIN_TEXT_KEYS:
+            return False
+        return any(keyword in key.upper() for keyword in ('TOKEN', 'SECRET', 'PASSWORD', 'PASSPHRASE', 'KEY'))
+
+    @classmethod
+    def is_masked_secret(cls, key: str, value: Any) -> bool:
+        """True if (key, value) is a secret string whose value must be masked.
+
+        Only *string* values are masked: the name heuristic matches some non-secret numeric
+        settings (e.g. CABINET_ACCESS_TOKEN_EXPIRE_MINUTES, WATA_PUBLIC_KEY_CACHE_SECONDS) that
+        must stay visible and editable, so gate on the value actually being a non-empty str.
+        """
+        return cls.is_secret_key(key) and isinstance(value, str) and value != ''
+
+    @classmethod
+    def mask_secret_value(cls, key: str, value: Any) -> Any:
+        """Return ``SECRET_MASK`` for a set secret string value, otherwise the value unchanged."""
+        if cls.is_masked_secret(key, value):
+            return cls.SECRET_MASK
+        return value
+
+    CATEGORY_TITLES: dict[str, str] = {
+        'CORE': '🤖 Основные настройки',
+        'SUPPORT': '💬 Поддержка и тикеты',
+        'REGISTRATION_ACCESS': '🔐 Регистрация и доступ',
+        'LOCALIZATION': '🌍 Языки интерфейса',
+        'CHANNEL': '📣 Обязательная подписка',
+        'TIMEZONE': '🗂 Timezone',
+        'PAYMENT': '💳 Общие платежные настройки',
+        'PAYMENT_VERIFICATION': '🕵️ Проверка платежей',
+        'TELEGRAM': '⭐ Telegram Stars',
+        'TELEGRAM_WIDGET': '🔐 Telegram Login Widget',
+        'TELEGRAM_OIDC': '🔑 Telegram Login (OIDC)',
+        'CRYPTOBOT': '🪙 CryptoBot',
+        'HELEKET': '🪙 Heleket',
+        'CLOUDPAYMENTS': '💳 CloudPayments',
+        'FREEKASSA': '💳 Freekassa',
+        'KASSA_AI': '💳 KassaAI',
+        'RIOPAY': '💳 RioPay',
+        'SEVERPAY': '💳 SeverPay',
+        'PAYPEAR': '💳 PayPear',
+        'ROLLYPAY': '💳 RollyPay',
+        'OVERPAY': '💳 Overpay',
+        'AURAPAY': '💳 AuraPay',
+        'ANTILOPAY': '🦌 Antilopay',
+        'ETOPLATEZHI': '💳 Etoplatezhi',
+        'JUPITER': '🪐 Jupiter',
+        'CISPAY': '💳 CisPay',
+        'TABPAY': '💳 TabPay',
+        'PARITYPAY': '💳 ParityPay',
+        'DONUT': '🍩 Donut',
+        'LAVA': '🌋 Lava',
+        'YOOKASSA': '🟣 YooKassa',
+        'PLATEGA': '💳 {platega_name}',
+        'TRIBUTE': '🎁 Tribute',
+        'MULENPAY': '💰 {mulenpay_name}',
+        'PAL24': '🏦 PAL24 / PayPalych',
+        'WATA': '💠 Wata',
+        'SUBSCRIPTIONS_CORE': '📅 Подписки и лимиты',
+        'SIMPLE_SUBSCRIPTION': '⚡ Простая покупка',
+        'PERIODS': '📆 Периоды подписок',
+        'SUBSCRIPTION_PRICES': '💵 Стоимость тарифов',
+        'TRAFFIC': '📊 Трафик',
+        'TRAFFIC_PACKAGES': '📦 Пакеты трафика',
+        'TRIAL': '🎁 Пробный период',
+        'REFERRAL': '👥 Реферальная программа',
+        'AUTOPAY': '🔄 Автопродление',
+        'NOTIFICATIONS': '🔔 Уведомления пользователям',
+        'ADMIN_NOTIFICATIONS': '📣 Оповещения администраторам',
+        'ADMIN_REPORTS': '🗂 Автоматические отчеты',
+        'INTERFACE': '🎨 Интерфейс и брендинг',
+        'INTERFACE_BRANDING': '🖼️ Брендинг',
+        'INTERFACE_SUBSCRIPTION': '🔗 Ссылка на подписку',
+        'CONNECT_BUTTON': '🚀 Кнопка подключения',
+        'MINIAPP': '📱 Mini App',
+        'HAPP': '🅷 Happ',
+        'INCY': '🅸 INCY',
+        'SKIP': '⚡ Быстрый старт',
+        'ADDITIONAL': '📱 Дополнительные приложения',
+        'DATABASE': '💾 База данных',
+        'POSTGRES': '🐘 PostgreSQL',
+        'SQLITE': '🧱 SQLite',
+        'REDIS': '🧠 Redis',
+        'REMNAWAVE': '🌐 RemnaWave API',
+        'SERVER_STATUS': '📊 Статус серверов',
+        'MONITORING': '📈 Мониторинг',
+        'MAINTENANCE': '🔧 Обслуживание',
+        'BACKUP': '💾 Резервные копии',
+        'VERSION': '🔄 Проверка версий',
+        'WEB_API': '⚡ Web API',
+        'WEBHOOK': '🌐 Webhook',
+        'WEBHOOK_NOTIFICATIONS': '📢 Уведомления от вебхуков',
+        'LOG': '📝 Логирование',
+        'DEBUG': '🧪 Режим разработки',
+        'MODERATION': '🛡️ Модерация и фильтры',
+        'BAN_NOTIFICATIONS': '🚫 Тексты уведомлений о блокировках',
+        'INFO_PAGES': '📄 Инфо-страницы',
+        'GRACE_ACCESS': '🛟 Grace-доступ',
+        'BSCHEK': '📶 BSCHEKER (bschekbot)',
+    }
+
+    CATEGORY_DESCRIPTIONS: dict[str, str] = {
+        'CORE': 'Базовые параметры работы бота и обязательные ссылки.',
+        'SUPPORT': 'Контакты поддержки, SLA и режимы обработки обращений.',
+        'REGISTRATION_ACCESS': 'Закрытая регистрация и допустимые способы приглашения новых пользователей.',
+        'LOCALIZATION': 'Доступные языки, локализация интерфейса и выбор языка.',
+        'CHANNEL': 'Настройки обязательной подписки на канал или группу.',
+        'TIMEZONE': 'Часовой пояс панели и отображение времени.',
+        'PAYMENT': 'Общие тексты платежей, описания чеков и шаблоны.',
+        'PAYMENT_VERIFICATION': 'Автоматическая проверка пополнений и интервал выполнения.',
+        'YOOKASSA': 'Интеграция с YooKassa: идентификаторы магазина и вебхуки.',
+        'CRYPTOBOT': 'CryptoBot и криптоплатежи через Telegram.',
+        'HELEKET': 'Heleket: криптоплатежи, ключи мерчанта и вебхуки.',
+        'CLOUDPAYMENTS': 'CloudPayments: оплата банковскими картами, Public ID, API Secret и вебхуки.',
+        'FREEKASSA': 'Freekassa: ID магазина, API ключ, секретные слова и вебхуки.',
+        'KASSA_AI': 'KassaAI: отдельная платёжка api.fk.life с СБП, картами и SberPay.',
+        'RIOPAY': 'RioPay: платёжная система api.riopay.online с поддержкой карт и СБП.',
+        'PAYPEAR': 'PayPear: платёжная система api.paypear.ru с поддержкой карт, СБП, SberPay и T-Pay.',
+        'ROLLYPAY': 'RollyPay: платёжный шлюз rollypay.io с СБП, картами и криптовалютой.',
+        'OVERPAY': 'Overpay: платёжный шлюз pay.overpay.io с mTLS и поддержкой карт и СБП.',
+        'AURAPAY': 'AuraPay: платёжный шлюз aurapay.tech с поддержкой карт и СБП.',
+        'ANTILOPAY': 'Antilopay: lk.antilopay.com, оплата картой, СБП и SberPay.',
+        'ETOPLATEZHI': 'Etoplatezhi: paymentpage.etoplatezhi.ru, оплата картой и через СБП.',
+        'JUPITER': 'Jupiter (FPGate P2P v2.1): app.juppiter.tech, эквайринг СБП с HMAC-SHA256.',
+        'CISPAY': 'cisPay: api.cispay.app, H2H-оплата картой и СБП на хостинговой странице, вебхуки с HMAC-SHA256.',
+        'TABPAY': 'TabPay: tabpay.org, СБП и карты с 3-D Secure; вебхуки подписаны HMAC-SHA256 (X-Signature-V2).',
+        'PARITYPAY': 'ParityPay: api.paritypay.net v2, СБП и карты; уведомления подписаны HMAC-SHA256 (X-SIGNATURE).',
+        'DONUT': 'Donut P2P: gw.donut.business, P2P-оплата картой, СБП по телефону и QR.',
+        'LAVA': 'Lava Business: gate.lava.ru, оплата картой и СБП с HMAC-SHA256 и подтверждением через webhook.',
+        'PLATEGA': '{platega_name}: merchant ID, секрет, ссылки возврата и методы оплаты.',
+        'MULENPAY': 'Платежи {mulenpay_name} и параметры магазина.',
+        'PAL24': 'PAL24 / PayPalych подключения и лимиты.',
+        'TRIBUTE': 'Tribute и донат-сервисы.',
+        'TELEGRAM': 'Telegram Stars и их стоимость.',
+        'TELEGRAM_WIDGET': 'Внешний вид виджета авторизации Telegram на странице входа в кабинет.',
+        'TELEGRAM_OIDC': 'OpenID Connect авторизация через Telegram (новая система). Требует настройки в BotFather > Bot Settings > Web Login.',
+        'WATA': 'Wata: токен доступа, тип платежа и пределы сумм.',
+        'SUBSCRIPTIONS_CORE': 'Лимиты устройств, трафика и базовые цены подписок.',
+        'SIMPLE_SUBSCRIPTION': 'Параметры упрощённой покупки: период, трафик, устройства и сквады.',
+        'PERIODS': 'Доступные периоды подписок и продлений.',
+        'SUBSCRIPTION_PRICES': 'Стоимость подписок по периодам в копейках.',
+        'TRAFFIC': 'Лимиты трафика и стратегии сброса.',
+        'TRAFFIC_PACKAGES': 'Цены пакетов трафика и конфигурация предложений.',
+        'TRIAL': 'Длительность и ограничения пробного периода.',
+        'REFERRAL': 'Бонусы и пороги реферальной программы.',
+        'AUTOPAY': 'Настройки автопродления и минимальный баланс.',
+        'NOTIFICATIONS': 'Пользовательские уведомления и кэширование сообщений.',
+        'ADMIN_NOTIFICATIONS': 'Оповещения админам о событиях и тикетах.',
+        'ADMIN_REPORTS': 'Автоматические отчеты для команды.',
+        'INTERFACE': 'Глобальные параметры интерфейса и брендирования.',
+        'INTERFACE_BRANDING': 'Логотип и фирменный стиль.',
+        'INTERFACE_SUBSCRIPTION': 'Отображение ссылок и кнопок подписок.',
+        'CONNECT_BUTTON': 'Поведение кнопки «Подключиться» и miniapp.',
+        'MINIAPP': 'Mini App и кастомные ссылки.',
+        'HAPP': 'Интеграция Happ и связанные ссылки.',
+        'INCY': 'Шифрованные deep links INCY (incy://crypt1/...).',
+        'SKIP': 'Настройки быстрого старта и гайд по подключению.',
+        'ADDITIONAL': 'Конфигурация deep links и кеша.',
+        'DATABASE': 'Режим работы базы данных и пути до файлов.',
+        'POSTGRES': 'Параметры подключения к PostgreSQL.',
+        'SQLITE': 'Файл SQLite и резервные параметры.',
+        'REDIS': 'Подключение к Redis для кэша.',
+        'REMNAWAVE': 'Параметры авторизации и интеграция с RemnaWave API.',
+        'SERVER_STATUS': 'Отображение статуса серверов и external URL.',
+        'MONITORING': 'Интервалы мониторинга и хранение логов.',
+        'MAINTENANCE': 'Режим обслуживания, сообщения и интервалы.',
+        'BACKUP': 'Резервное копирование и расписание.',
+        'VERSION': 'Отслеживание обновлений репозитория.',
+        'WEB_API': 'Web API, токены и права доступа.',
+        'WEBHOOK': 'Пути и секреты вебхуков.',
+        'WEBHOOK_NOTIFICATIONS': 'Управление уведомлениями, которые получают пользователи при событиях RemnaWave (отключение/активация подписки, устройства, трафик и т.д.).',
+        'LOG': 'Уровни логирования и ротация.',
+        'DEBUG': 'Отладочные функции и безопасный режим.',
+        'MODERATION': 'Настройки фильтров отображаемых имен и защиты от фишинга.',
+        'BAN_NOTIFICATIONS': 'Тексты уведомлений о блокировках, которые отправляются пользователям.',
+        'INFO_PAGES': 'Видимость встроенных страниц (правила, политика, оферта, FAQ) в боте и веб-кабинете.',
+        'GRACE_ACCESS': (
+            'Временный ограниченный доступ для истёкших и лимитных подписок. '
+            'Здесь ключи лежат по отдельности; связанный экран с проверкой конфигурации и состоянием '
+            'сессий — в админке кабинета, раздел «Grace-доступ».'
+        ),
+        'BSCHEK': (
+            'Проверка хостов и конфигов глазами мобильных операторов РФ через bschekbot API: '
+            'ключ, эталонная подписка панели, потолок цены одной задачи.'
+        ),
+    }
+
+    @staticmethod
+    def _format_dynamic_copy(category_key: str | None, value: str) -> str:
+        if not value:
+            return value
+        if category_key == 'MULENPAY':
+            return value.format(mulenpay_name=settings.get_mulenpay_display_name())
+        if category_key == 'PLATEGA':
+            return value.format(platega_name=settings.get_platega_display_name())
+        return value
+
+    CATEGORY_KEY_OVERRIDES: dict[str, str] = {
+        'DATABASE_URL': 'DATABASE',
+        'DATABASE_MODE': 'DATABASE',
+        'LOCALES_PATH': 'LOCALIZATION',
+        'CHANNEL_IS_REQUIRED_SUB': 'CHANNEL',
+        'BOT_USERNAME': 'CORE',
+        'INVITE_ONLY_ENABLED': 'REGISTRATION_ACCESS',
+        'INVITE_ONLY_ALLOW_GIFT_LINKS': 'REGISTRATION_ACCESS',
+        'DEFAULT_LANGUAGE': 'LOCALIZATION',
+        'AVAILABLE_LANGUAGES': 'LOCALIZATION',
+        'REMNAWAVE_WEBHOOK_NOTIFY_NODE_CONNECTION_STATUS': 'ADMIN_NOTIFICATIONS',
+        'LANGUAGE_SELECTION_ENABLED': 'LOCALIZATION',
+        'DEFAULT_DEVICE_LIMIT': 'SUBSCRIPTIONS_CORE',
+        'DEFAULT_TRAFFIC_LIMIT_GB': 'SUBSCRIPTIONS_CORE',
+        'MAX_DEVICES_LIMIT': 'SUBSCRIPTIONS_CORE',
+        # Без явной привязки ключ уехал бы в автокатегорию «ALLOW» (категория берётся
+        # из первого слова), где его никто не найдёт: искать его будут рядом с
+        # MAX_DEVICES_LIMIT и PRICE_PER_DEVICE.
+        'ALLOW_DEVICES_BELOW_TARIFF_LIMIT': 'SUBSCRIPTIONS_CORE',
+        'PRICE_PER_DEVICE': 'SUBSCRIPTIONS_CORE',
+        'DEVICES_SELECTION_ENABLED': 'SUBSCRIPTIONS_CORE',
+        'DEVICES_SELECTION_DISABLED_AMOUNT': 'SUBSCRIPTIONS_CORE',
+        'BASE_SUBSCRIPTION_PRICE': 'SUBSCRIPTIONS_CORE',
+        'SALES_MODE': 'SUBSCRIPTIONS_CORE',
+        'DEFAULT_TRAFFIC_RESET_STRATEGY': 'TRAFFIC',
+        'RESET_TRAFFIC_ON_PAYMENT': 'TRAFFIC',
+        'RESET_TRAFFIC_ON_TARIFF_SWITCH': 'TRAFFIC',
+        'TRAFFIC_SELECTION_MODE': 'TRAFFIC',
+        'FIXED_TRAFFIC_LIMIT_GB': 'TRAFFIC',
+        'AVAILABLE_SUBSCRIPTION_PERIODS': 'PERIODS',
+        'AVAILABLE_RENEWAL_PERIODS': 'PERIODS',
+        'PRICE_14_DAYS': 'SUBSCRIPTION_PRICES',
+        'PRICE_30_DAYS': 'SUBSCRIPTION_PRICES',
+        'PRICE_60_DAYS': 'SUBSCRIPTION_PRICES',
+        'PRICE_90_DAYS': 'SUBSCRIPTION_PRICES',
+        'PRICE_180_DAYS': 'SUBSCRIPTION_PRICES',
+        'PRICE_360_DAYS': 'SUBSCRIPTION_PRICES',
+        'PAID_SUBSCRIPTION_USER_TAG': 'SUBSCRIPTION_PRICES',
+        'TRAFFIC_PACKAGES_CONFIG': 'TRAFFIC_PACKAGES',
+        'MULTI_TARIFF_ENABLED': 'SUBSCRIPTIONS_CORE',
+        'MAX_ACTIVE_SUBSCRIPTIONS': 'SUBSCRIPTIONS_CORE',
+        'BASE_PROMO_GROUP_PERIOD_DISCOUNTS_ENABLED': 'SUBSCRIPTIONS_CORE',
+        'BASE_PROMO_GROUP_PERIOD_DISCOUNTS': 'SUBSCRIPTIONS_CORE',
+        'DEFAULT_AUTOPAY_ENABLED': 'AUTOPAY',
+        'DEFAULT_AUTOPAY_DAYS_BEFORE': 'AUTOPAY',
+        'MIN_BALANCE_FOR_AUTOPAY_KOPEKS': 'AUTOPAY',
+        'TRIAL_WARNING_HOURS': 'TRIAL',
+        'TRIAL_USER_TAG': 'TRIAL',
+        'SUPPORT_USERNAME': 'SUPPORT',
+        'SUPPORT_MENU_ENABLED': 'SUPPORT',
+        'SUPPORT_SYSTEM_MODE': 'SUPPORT',
+        'SUPPORT_TICKET_SLA_ENABLED': 'SUPPORT',
+        'SUPPORT_TICKET_SLA_MINUTES': 'SUPPORT',
+        'SUPPORT_TICKET_SLA_CHECK_INTERVAL_SECONDS': 'SUPPORT',
+        'SUPPORT_TICKET_SLA_REMINDER_COOLDOWN_MINUTES': 'SUPPORT',
+        'ADMIN_NOTIFICATIONS_ENABLED': 'ADMIN_NOTIFICATIONS',
+        'ADMIN_NOTIFICATIONS_RICH_ENABLED': 'ADMIN_NOTIFICATIONS',
+        'ADMIN_NOTIFICATIONS_CHAT_ID': 'ADMIN_NOTIFICATIONS',
+        'ADMIN_NOTIFICATIONS_TOPIC_ID': 'ADMIN_NOTIFICATIONS',
+        'ADMIN_NOTIFICATIONS_TICKET_TOPIC_ID': 'ADMIN_NOTIFICATIONS',
+        'ADMIN_NOTIFICATIONS_PURCHASES_TOPIC_ID': 'ADMIN_NOTIFICATIONS',
+        'ADMIN_NOTIFICATIONS_RENEWALS_TOPIC_ID': 'ADMIN_NOTIFICATIONS',
+        'ADMIN_NOTIFICATIONS_TRIALS_TOPIC_ID': 'ADMIN_NOTIFICATIONS',
+        'ADMIN_NOTIFICATIONS_BALANCE_TOPIC_ID': 'ADMIN_NOTIFICATIONS',
+        'ADMIN_NOTIFICATIONS_ADDONS_TOPIC_ID': 'ADMIN_NOTIFICATIONS',
+        'ADMIN_NOTIFICATIONS_INFRASTRUCTURE_TOPIC_ID': 'ADMIN_NOTIFICATIONS',
+        'ADMIN_NOTIFICATIONS_ERRORS_TOPIC_ID': 'ADMIN_NOTIFICATIONS',
+        'ADMIN_NOTIFICATIONS_PROMO_TOPIC_ID': 'ADMIN_NOTIFICATIONS',
+        'ADMIN_NOTIFICATIONS_PARTNERS_TOPIC_ID': 'ADMIN_NOTIFICATIONS',
+        'ADMIN_REPORTS_ENABLED': 'ADMIN_REPORTS',
+        'ADMIN_REPORTS_CHAT_ID': 'ADMIN_REPORTS',
+        'ADMIN_REPORTS_TOPIC_ID': 'ADMIN_REPORTS',
+        'ADMIN_REPORTS_SEND_TIME': 'ADMIN_REPORTS',
+        'PAYMENT_SERVICE_NAME': 'PAYMENT',
+        'PAYMENT_BALANCE_DESCRIPTION': 'PAYMENT',
+        'PAYMENT_SUBSCRIPTION_DESCRIPTION': 'PAYMENT',
+        'PAYMENT_BALANCE_TEMPLATE': 'PAYMENT',
+        'PAYMENT_SUBSCRIPTION_TEMPLATE': 'PAYMENT',
+        'AUTO_PURCHASE_AFTER_TOPUP_ENABLED': 'PAYMENT',
+        'SIMPLE_SUBSCRIPTION_ENABLED': 'SIMPLE_SUBSCRIPTION',
+        'SIMPLE_SUBSCRIPTION_PERIOD_DAYS': 'SIMPLE_SUBSCRIPTION',
+        'SIMPLE_SUBSCRIPTION_DEVICE_LIMIT': 'SIMPLE_SUBSCRIPTION',
+        'SIMPLE_SUBSCRIPTION_TRAFFIC_GB': 'SIMPLE_SUBSCRIPTION',
+        'SIMPLE_SUBSCRIPTION_SQUAD_UUID': 'SIMPLE_SUBSCRIPTION',
+        'SUPPORT_TOPUP_ENABLED': 'PAYMENT',
+        # Ключи, начинающиеся с глагола, без явной привязки создают бессмысленную
+        # автокатегорию по первому слову («ACTIVATE», «BUY», «LOW»…), и настройка
+        # теряется: в такой раздел оператор не пойдёт.
+        'ACTIVATE_BUTTON_VISIBLE': 'CONNECT_BUTTON',
+        'ACTIVATE_BUTTON_TEXT': 'CONNECT_BUTTON',
+        'BUY_TRAFFIC_BUTTON_VISIBLE': 'INTERFACE',
+        'DISABLE_WEB_PAGE_PREVIEW': 'INTERFACE',
+        'ENABLE_AUTOPAY': 'AUTOPAY',
+        'DEFAULT_AUTOPAY_PERIOD_DAYS': 'AUTOPAY',
+        'RESET_DEVICES_ON_RENEWAL': 'SUBSCRIPTIONS_CORE',
+        'LOW_BALANCE_ALERT_EXPIRY_DAYS': 'NOTIFICATIONS',
+        'ENABLE_NOTIFICATIONS': 'NOTIFICATIONS',
+        'NOTIFICATION_RETRY_ATTEMPTS': 'NOTIFICATIONS',
+        'NOTIFICATION_CACHE_HOURS': 'NOTIFICATIONS',
+        'MONITORING_LOGS_RETENTION_DAYS': 'MONITORING',
+        'MONITORING_INTERVAL': 'MONITORING',
+        'TRAFFIC_MONITORING_ENABLED': 'MONITORING',
+        'TRAFFIC_MONITORING_INTERVAL_HOURS': 'MONITORING',
+        'TRAFFIC_MONITORED_NODES': 'MONITORING',
+        'TRAFFIC_SNAPSHOT_TTL_HOURS': 'MONITORING',
+        'TRAFFIC_FAST_CHECK_ENABLED': 'MONITORING',
+        'TRAFFIC_FAST_CHECK_INTERVAL_MINUTES': 'MONITORING',
+        'TRAFFIC_FAST_CHECK_THRESHOLD_GB': 'MONITORING',
+        'TRAFFIC_DAILY_CHECK_ENABLED': 'MONITORING',
+        'TRAFFIC_DAILY_CHECK_TIME': 'MONITORING',
+        'TRAFFIC_DAILY_THRESHOLD_GB': 'MONITORING',
+        'TRAFFIC_IGNORED_NODES': 'MONITORING',
+        'TRAFFIC_EXCLUDED_USER_IDS': 'MONITORING',
+        'TRAFFIC_NOTIFICATION_COOLDOWN_MINUTES': 'MONITORING',
+        'SUSPICIOUS_NOTIFICATIONS_TOPIC_ID': 'MONITORING',
+        'TRAFFIC_CHECK_BATCH_SIZE': 'MONITORING',
+        'TRAFFIC_CHECK_CONCURRENCY': 'MONITORING',
+        'ENABLE_LOGO_MODE': 'INTERFACE_BRANDING',
+        'LOGO_FILE': 'INTERFACE_BRANDING',
+        'HIDE_SUBSCRIPTION_LINK': 'INTERFACE_SUBSCRIPTION',
+        'MAIN_MENU_MODE': 'INTERFACE',
+        'MAIN_MENU_RICH_ENABLED': 'INTERFACE',
+        'MAIN_MENU_RICH_EFFECT_ID': 'INTERFACE',
+        'MAIN_MENU_RICH_LOGO_URL': 'INTERFACE',
+        'MAIN_MENU_RICH_SUBSCRIPTIONS_COLLAPSIBLE': 'INTERFACE',
+        'MAIN_MENU_RICH_INLINE_BUTTONS': 'INTERFACE',
+        'USER_NOTIFICATIONS_RICH_ENABLED': 'INTERFACE',
+        'USER_ACTION_LOG_ENABLED': 'MONITORING',
+        'USER_ACTION_LOG_RETENTION_DAYS': 'MONITORING',
+        'CABINET_BUTTON_STYLE': 'INTERFACE',
+        'CONNECT_BUTTON_MODE': 'CONNECT_BUTTON',
+        'MINIAPP_CUSTOM_URL': 'CONNECT_BUTTON',
+        'ENABLE_DEEP_LINKS': 'ADDITIONAL',
+        'APP_CONFIG_CACHE_TTL': 'ADDITIONAL',
+        'INACTIVE_USER_DELETE_MONTHS': 'MAINTENANCE',
+        'MAINTENANCE_MESSAGE': 'MAINTENANCE',
+        'MAINTENANCE_CHECK_INTERVAL': 'MAINTENANCE',
+        'MAINTENANCE_AUTO_ENABLE': 'MAINTENANCE',
+        'MAINTENANCE_RETRY_ATTEMPTS': 'MAINTENANCE',
+        'WEBHOOK_URL': 'WEBHOOK',
+        'WEBHOOK_SECRET': 'WEBHOOK',
+        'VERSION_CHECK_ENABLED': 'VERSION',
+        'VERSION_CHECK_REPO': 'VERSION',
+        'VERSION_CHECK_INTERVAL_HOURS': 'VERSION',
+        'TELEGRAM_STARS_RATE_RUB': 'TELEGRAM',
+        'REMNAWAVE_USER_DESCRIPTION_TEMPLATE': 'REMNAWAVE',
+        'REMNAWAVE_USER_USERNAME_TEMPLATE': 'REMNAWAVE',
+        'REMNAWAVE_AUTO_SYNC_ENABLED': 'REMNAWAVE',
+        'REMNAWAVE_AUTO_SYNC_TIMES': 'REMNAWAVE',
+        'REMNAWAVE_API_REQUESTS_PER_MINUTE': 'REMNAWAVE',
+        'CABINET_REMNA_SUB_CONFIG': 'MINIAPP',
+        # Date format applied to email-template variables
+        # (expires_at, new_expires_at). Lives in the TIMEZONE
+        # category so operators find it next to TIMEZONE itself.
+        'EMAIL_DATE_FORMAT': 'TIMEZONE',
+        'PRIVACY_POLICY_DISPLAY_MODE': 'INFO_PAGES',
+        'PUBLIC_OFFER_DISPLAY_MODE': 'INFO_PAGES',
+        'RECURRENT_PAYMENTS_DISPLAY_MODE': 'INFO_PAGES',
+        'SERVICE_RULES_DISPLAY_MODE': 'INFO_PAGES',
+        'FAQ_DISPLAY_MODE': 'INFO_PAGES',
+    }
+
+    CATEGORY_PREFIX_OVERRIDES: dict[str, str] = {
+        'SUPPORT_': 'SUPPORT',
+        'ADMIN_NOTIFICATIONS': 'ADMIN_NOTIFICATIONS',
+        'ADMIN_REPORTS': 'ADMIN_REPORTS',
+        'CHANNEL_': 'CHANNEL',
+        'POSTGRES_': 'POSTGRES',
+        'SQLITE_': 'SQLITE',
+        'REDIS_': 'REDIS',
+        'REMNAWAVE': 'REMNAWAVE',
+        'TRIAL_': 'TRIAL',
+        'TRAFFIC_PACKAGES': 'TRAFFIC_PACKAGES',
+        'PRICE_TRAFFIC': 'TRAFFIC_PACKAGES',
+        'TRAFFIC_': 'TRAFFIC',
+        'REFERRAL_': 'REFERRAL',
+        'AUTOPAY_': 'AUTOPAY',
+        'TELEGRAM_OIDC_': 'TELEGRAM_OIDC',
+        'TELEGRAM_WIDGET_': 'TELEGRAM_WIDGET',
+        'TELEGRAM_STARS': 'TELEGRAM',
+        'TRIBUTE_': 'TRIBUTE',
+        'YOOKASSA_': 'YOOKASSA',
+        'CRYPTOBOT_': 'CRYPTOBOT',
+        'HELEKET_': 'HELEKET',
+        'CLOUDPAYMENTS_': 'CLOUDPAYMENTS',
+        'FREEKASSA_': 'FREEKASSA',
+        'KASSA_AI_': 'KASSA_AI',
+        'RIOPAY_': 'RIOPAY',
+        'SEVERPAY_': 'SEVERPAY',
+        'PAYPEAR_': 'PAYPEAR',
+        'ROLLYPAY_': 'ROLLYPAY',
+        'OVERPAY_': 'OVERPAY',
+        'AURAPAY_': 'AURAPAY',
+        'ANTILOPAY_': 'ANTILOPAY',
+        'ETOPLATEZHI_': 'ETOPLATEZHI',
+        'JUPITER_': 'JUPITER',
+        'CISPAY_': 'CISPAY',
+        'TABPAY_': 'TABPAY',
+        'PARITYPAY_': 'PARITYPAY',
+        'DONUT_': 'DONUT',
+        'LAVA_': 'LAVA',
+        'PLATEGA_': 'PLATEGA',
+        'MULENPAY_': 'MULENPAY',
+        'PAL24_': 'PAL24',
+        'PAYMENT_': 'PAYMENT',
+        'PAYMENT_VERIFICATION_': 'PAYMENT_VERIFICATION',
+        'WATA_': 'WATA',
+        'SIMPLE_SUBSCRIPTION_': 'SIMPLE_SUBSCRIPTION',
+        'CONNECT_BUTTON_HAPP': 'HAPP',
+        'HAPP_': 'HAPP',
+        'INCY_': 'INCY',
+        'SKIP_': 'SKIP',
+        'MINIAPP_': 'MINIAPP',
+        'MONITORING_': 'MONITORING',
+        'NOTIFICATION_': 'NOTIFICATIONS',
+        'SERVER_STATUS': 'SERVER_STATUS',
+        'MAINTENANCE_': 'MAINTENANCE',
+        'VERSION_CHECK': 'VERSION',
+        'BACKUP_': 'BACKUP',
+        'WEBHOOK_NOTIFY_': 'WEBHOOK_NOTIFICATIONS',
+        'WEBHOOK_': 'WEBHOOK',
+        'LOG_': 'LOG',
+        'WEB_API_': 'WEB_API',
+        'DEBUG': 'DEBUG',
+        'DISPLAY_NAME_': 'MODERATION',
+        'BAN_MSG_': 'BAN_NOTIFICATIONS',
+        'GRACE_ACCESS_': 'GRACE_ACCESS',
+        'BSCHEK_': 'BSCHEK',
+    }
+
+    CHOICES: dict[str, list[ChoiceOption]] = {
+        'GRACE_ACCESS_MODE': [
+            ChoiceOption('false', '⛔️ Выключен', 'Grace-сессии не выдаются и не завершаются'),
+            ChoiceOption('observe', '👀 Наблюдение', 'Кандидаты только логируются, панель не меняется'),
+            ChoiceOption('true', '🛟 Включён', 'Выдаёт и завершает grace-доступ'),
+            ChoiceOption('drain', '🚰 Слив', 'Новых сессий нет, открытые доводятся до конца'),
+        ],
+        'REFERRAL_REWARD_SCHEME': [
+            ChoiceOption('legacy', '💰 Классическая', 'Проценты и фиксированные бонусы из настроек REFERRAL_*'),
+            ChoiceOption('levels', '🪜 Многоуровневая', 'Уровни с деньгами и/или днями подписки'),
+        ],
+        'REFERRAL_ALLOW_DAYS_TARGET_CHOICE': [
+            ChoiceOption('true', '✅ Разрешено', 'Пользователь сам выбирает подписку для дней награды'),
+            ChoiceOption('false', '⛔️ Запрещено', 'Подписку подбирает бот — платную с самым поздним сроком'),
+        ],
+        'REFERRAL_ALLOW_REWARD_KIND_CHOICE': [
+            ChoiceOption('true', '✅ Разрешено', 'Пользователь выбирает: деньги или дни, когда правило даёт оба'),
+            ChoiceOption('false', '⛔️ Запрещено', 'Выдаётся всё, что настроено правилом'),
+        ],
+        'REFERRAL_LEVELS_MODE': [
+            ChoiceOption('chain', '🔗 Цепочка', 'Уровень = глубина: платят и пригласившему, и тем, кто выше'),
+            ChoiceOption('tiers', '🏅 Ранги', 'Уровень = ранг за число рефералов: платят только прямому пригласившему'),
+        ],
+        'DATABASE_MODE': [
+            ChoiceOption('auto', '🤖 Авто'),
+            ChoiceOption('postgresql', '🐘 PostgreSQL'),
+            ChoiceOption('sqlite', '💾 SQLite'),
+        ],
+        'REMNAWAVE_AUTH_TYPE': [
+            ChoiceOption('api_key', '🔑 API Key'),
+            ChoiceOption('basic_auth', '🧾 Basic Auth'),
+        ],
+        'REMNAWAVE_USER_DELETE_MODE': [
+            ChoiceOption('delete', '🗑 Удалять'),
+            ChoiceOption('disable', '🚫 Деактивировать'),
+        ],
+        'TRAFFIC_SELECTION_MODE': [
+            ChoiceOption('selectable', '📦 Выбор пакетов'),
+            ChoiceOption('fixed', '📏 Фиксированный лимит'),
+            ChoiceOption('fixed_with_topup', '📏 Фикс. лимит + докупка'),
+        ],
+        'DEFAULT_TRAFFIC_RESET_STRATEGY': [
+            ChoiceOption('NO_RESET', '♾️ Без сброса'),
+            ChoiceOption('DAY', '📅 Ежедневно'),
+            ChoiceOption('WEEK', '🗓 Еженедельно'),
+            ChoiceOption('MONTH', '📆 Ежемесячно'),
+        ],
+        'SUPPORT_SYSTEM_MODE': [
+            ChoiceOption('tickets', '🎫 Только тикеты'),
+            ChoiceOption('contact', '💬 Только контакт'),
+            ChoiceOption('both', '🔁 Оба варианта'),
+        ],
+        'CONNECT_BUTTON_MODE': [
+            ChoiceOption('guide', '📘 Гайд'),
+            ChoiceOption('miniapp_subscription', '🧾 Mini App подписка'),
+            ChoiceOption('miniapp_custom', '🧩 Mini App (ссылка)'),
+            ChoiceOption('link', '🔗 Прямая ссылка'),
+            ChoiceOption('happ_cryptolink', '🪙 Happ CryptoLink'),
+        ],
+        'MAIN_MENU_MODE': [
+            ChoiceOption('default', '📋 Полное меню'),
+            ChoiceOption('cabinet', '🏠 Cabinet (МиниАпп)'),
+        ],
+        'CABINET_BUTTON_STYLE': [
+            ChoiceOption('', '🎨 По секциям (авто)'),
+            ChoiceOption('primary', '🔵 Синий'),
+            ChoiceOption('success', '🟢 Зелёный'),
+            ChoiceOption('danger', '🔴 Красный'),
+        ],
+        'SALES_MODE': [
+            ChoiceOption('classic', '📋 Классический (периоды из .env)'),
+            ChoiceOption('tariffs', '📦 Тарифы (из кабинета)'),
+        ],
+        'SERVER_STATUS_MODE': [
+            ChoiceOption('disabled', '🚫 Отключено'),
+            ChoiceOption('external_link', '🌐 Внешняя ссылка'),
+            ChoiceOption('external_link_miniapp', '🧭 Mini App ссылка'),
+            ChoiceOption('xray', '📊 XRay Checker'),
+        ],
+        'YOOKASSA_PAYMENT_MODE': [
+            ChoiceOption('full_payment', '💳 Полная оплата'),
+            ChoiceOption('partial_payment', '🪙 Частичная оплата'),
+            ChoiceOption('advance', '💼 Аванс'),
+            ChoiceOption('full_prepayment', '📦 Полная предоплата'),
+            ChoiceOption('partial_prepayment', '📦 Частичная предоплата'),
+            ChoiceOption('credit', '💰 Кредит'),
+            ChoiceOption('credit_payment', '💸 Погашение кредита'),
+        ],
+        'YOOKASSA_PAYMENT_SUBJECT': [
+            ChoiceOption('commodity', '📦 Товар'),
+            ChoiceOption('excise', '🥃 Подакцизный товар'),
+            ChoiceOption('job', '🛠 Работа'),
+            ChoiceOption('service', '🧾 Услуга'),
+            ChoiceOption('gambling_bet', '🎲 Ставка'),
+            ChoiceOption('gambling_prize', '🏆 Выигрыш'),
+            ChoiceOption('lottery', '🎫 Лотерея'),
+            ChoiceOption('lottery_prize', '🎁 Приз лотереи'),
+            ChoiceOption('intellectual_activity', '🧠 Интеллектуальная деятельность'),
+            ChoiceOption('payment', '💱 Платеж'),
+            ChoiceOption('agent_commission', '🤝 Комиссия агента'),
+            ChoiceOption('composite', '🧩 Композитный'),
+            ChoiceOption('another', '📄 Другое'),
+        ],
+        'YOOKASSA_VAT_CODE': [
+            ChoiceOption(1, '1 — НДС не облагается'),
+            ChoiceOption(2, '2 — НДС 0%'),
+            ChoiceOption(3, '3 — НДС 10%'),
+            ChoiceOption(4, '4 — НДС 20%'),
+            ChoiceOption(5, '5 — НДС 10/110'),
+            ChoiceOption(6, '6 — НДС 20/120'),
+            ChoiceOption(7, '7 — НДС 5%'),
+            ChoiceOption(8, '8 — НДС 7%'),
+            ChoiceOption(9, '9 — НДС 5/105'),
+            ChoiceOption(10, '10 — НДС 7/107'),
+            ChoiceOption(11, '11 — НДС 22%'),
+            ChoiceOption(12, '12 — НДС 22/122'),
+        ],
+        'MULENPAY_LANGUAGE': [
+            ChoiceOption('ru', '🇷🇺 Русский'),
+            ChoiceOption('en', '🇬🇧 Английский'),
+        ],
+        'LOG_LEVEL': [
+            ChoiceOption('DEBUG', '🐞 Debug'),
+            ChoiceOption('INFO', 'ℹ️ Info'),
+            ChoiceOption('WARNING', '⚠️ Warning'),
+            ChoiceOption('ERROR', '❌ Error'),
+            ChoiceOption('CRITICAL', '🔥 Critical'),
+        ],
+        'TRIAL_DISABLED_FOR': [
+            ChoiceOption('none', '✅ Включён для всех'),
+            ChoiceOption('email', '📧 Отключён для Email'),
+            ChoiceOption('telegram', '📱 Отключён для Telegram'),
+            ChoiceOption('all', '🚫 Отключён для всех'),
+        ],
+        'TELEGRAM_WIDGET_SIZE': [
+            ChoiceOption('large', '🔵 Large'),
+            ChoiceOption('medium', '🟡 Medium'),
+            ChoiceOption('small', '🟢 Small'),
+        ],
+        'PRIVACY_POLICY_DISPLAY_MODE': [
+            ChoiceOption('bot', '🤖 Только бот'),
+            ChoiceOption('web', '🌐 Только веб'),
+            ChoiceOption('both', '🔁 Бот и веб'),
+        ],
+        'PUBLIC_OFFER_DISPLAY_MODE': [
+            ChoiceOption('bot', '🤖 Только бот'),
+            ChoiceOption('web', '🌐 Только веб'),
+            ChoiceOption('both', '🔁 Бот и веб'),
+        ],
+        'RECURRENT_PAYMENTS_DISPLAY_MODE': [
+            ChoiceOption('bot', '🤖 Только бот'),
+            ChoiceOption('web', '🌐 Только веб'),
+            ChoiceOption('both', '🔁 Бот и веб'),
+        ],
+        'SERVICE_RULES_DISPLAY_MODE': [
+            ChoiceOption('bot', '🤖 Только бот'),
+            ChoiceOption('web', '🌐 Только веб'),
+            ChoiceOption('both', '🔁 Бот и веб'),
+        ],
+        'FAQ_DISPLAY_MODE': [
+            ChoiceOption('bot', '🤖 Только бот'),
+            ChoiceOption('web', '🌐 Только веб'),
+            ChoiceOption('both', '🔁 Бот и веб'),
+        ],
+    }
+
+    SETTING_HINTS: dict[str, dict[str, str]] = {
+        'SUPPORT_ADMIN_TICKET_NOTIFICATIONS_ENABLED': {
+            'description': 'Сообщать администраторам в Telegram о новых тикетах и ответах пользователей.',
+            'format': 'Булево значение (да/нет).',
+            'example': 'true',
+            'warning': 'Действует вместе с общими оповещениями администраторам: выключены они — не будет и этих.',
+            'dependencies': 'ADMIN_NOTIFICATIONS_ENABLED, ADMIN_NOTIFICATIONS_TICKET_TOPIC_ID',
+        },
+        'SUPPORT_USER_TICKET_NOTIFICATIONS_ENABLED': {
+            'description': 'Сообщать пользователю в Telegram об ответе поддержки на его тикет.',
+            'format': 'Булево значение (да/нет).',
+            'example': 'true',
+            'warning': 'Общий выключатель уведомлений пользователям (ENABLE_NOTIFICATIONS) главнее.',
+            'dependencies': 'ENABLE_NOTIFICATIONS',
+        },
+        'SUPPORT_CABINET_USER_NOTIFICATIONS_ENABLED': {
+            'description': 'Показывать пользователю в кабинете уведомление об ответе на тикет.',
+            'format': 'Булево значение (да/нет).',
+            'example': 'true',
+            'warning': 'Касается только кабинета; уведомления в Telegram — отдельный переключатель.',
+            'dependencies': 'SUPPORT_USER_TICKET_NOTIFICATIONS_ENABLED',
+        },
+        'SUPPORT_CABINET_ADMIN_NOTIFICATIONS_ENABLED': {
+            'description': 'Показывать администраторам в кабинете уведомления о новых тикетах.',
+            'format': 'Булево значение (да/нет).',
+            'example': 'true',
+            'warning': 'Касается только кабинета; оповещения в Telegram — отдельный переключатель.',
+            'dependencies': 'SUPPORT_ADMIN_TICKET_NOTIFICATIONS_ENABLED',
+        },
+        'SUPPORT_MODERATOR_IDS': {
+            'description': 'Модераторы поддержки: пользователи, которым доступны тикеты без прав администратора.',
+            'format': 'Telegram ID через запятую, например 123456789,987654321.',
+            'example': '',
+            'warning': 'Пусто — модераторов нет. Меняется и из меню поддержки в админке бота.',
+            'dependencies': 'SUPPORT_SYSTEM_MODE',
+        },
+        'NOTIFICATION_TRIAL_CHANNEL_UNSUBSCRIBED_ENABLED': {
+            'description': 'Писать пользователю, когда он отписался от обязательного канала и доступ приостановлен.',
+            'format': 'Булево значение (да/нет).',
+            'example': 'true',
+            'warning': 'Выключено — пользователь узнаёт о приостановке только из бота.',
+            'dependencies': 'CHANNEL_IS_REQUIRED_FOR_TRIAL, CHANNEL_REQUIRED_FOR_ALL',
+        },
+        'NOTIFICATION_EXPIRED_1D_ENABLED': {
+            'description': 'Напоминание через день после истечения подписки (без скидки).',
+            'format': 'Булево значение (да/нет).',
+            'example': 'true',
+            'warning': 'Действует сразу, без перезапуска. Общий выключатель ENABLE_NOTIFICATIONS главнее.',
+            'dependencies': 'ENABLE_NOTIFICATIONS',
+        },
+        'NOTIFICATION_EXPIRED_WAVE2_ENABLED': {
+            'description': 'Предложение со скидкой через 2–3 дня после истечения подписки (expired_discount_wave2).',
+            'format': 'Булево значение (да/нет).',
+            'example': 'true',
+            'warning': 'Выключено — предложения этой волны не создаются и не отправляются. Действует сразу.',
+            'dependencies': 'NOTIFICATION_EXPIRED_WAVE2_DISCOUNT_PERCENT, NOTIFICATION_EXPIRED_WAVE2_VALID_HOURS',
+        },
+        'NOTIFICATION_EXPIRED_WAVE2_DISCOUNT_PERCENT': {
+            'description': 'Размер скидки в предложении через 2–3 дня после истечения.',
+            'format': 'Целое число от 0 до 100 (процентов).',
+            'example': '10',
+            'warning': 'Скидка суммируется с промогруппой пользователя.',
+            'dependencies': 'NOTIFICATION_EXPIRED_WAVE2_ENABLED',
+        },
+        'NOTIFICATION_EXPIRED_WAVE2_VALID_HOURS': {
+            'description': 'Сколько часов действует скидка из предложения через 2–3 дня.',
+            'format': 'Целое число от 1 до 168 (часов).',
+            'example': '24',
+            'warning': 'Считается с момента отправки предложения.',
+            'dependencies': 'NOTIFICATION_EXPIRED_WAVE2_ENABLED',
+        },
+        'NOTIFICATION_EXPIRED_WAVE3_ENABLED': {
+            'description': 'Позднее предложение со скидкой через N дней после истечения (expired_discount_wave3).',
+            'format': 'Булево значение (да/нет).',
+            'example': 'true',
+            'warning': 'Выключено — предложения этой волны не создаются и не отправляются. Действует сразу.',
+            'dependencies': 'NOTIFICATION_EXPIRED_WAVE3_TRIGGER_DAYS, NOTIFICATION_EXPIRED_WAVE3_DISCOUNT_PERCENT',
+        },
+        'NOTIFICATION_EXPIRED_WAVE3_DISCOUNT_PERCENT': {
+            'description': 'Размер скидки в позднем предложении.',
+            'format': 'Целое число от 0 до 100 (процентов).',
+            'example': '20',
+            'warning': 'Скидка суммируется с промогруппой пользователя.',
+            'dependencies': 'NOTIFICATION_EXPIRED_WAVE3_ENABLED',
+        },
+        'NOTIFICATION_EXPIRED_WAVE3_VALID_HOURS': {
+            'description': 'Сколько часов действует скидка из позднего предложения.',
+            'format': 'Целое число от 1 до 168 (часов).',
+            'example': '24',
+            'warning': 'Считается с момента отправки предложения.',
+            'dependencies': 'NOTIFICATION_EXPIRED_WAVE3_ENABLED',
+        },
+        'NOTIFICATION_EXPIRED_WAVE3_TRIGGER_DAYS': {
+            'description': 'Через сколько дней после истечения подписки отправлять позднее предложение.',
+            'format': 'Целое число от 2 до 60 (дней).',
+            'example': '5',
+            'warning': 'Подписки старше 30 дней после истечения не рассматриваются.',
+            'dependencies': 'NOTIFICATION_EXPIRED_WAVE3_ENABLED',
+        },
+        'GRACE_ACCESS_MODE': {
+            'description': (
+                'Режим grace-доступа: временного ограниченного VPN-доступа для истёкшей или упёршейся '
+                'в лимит подписки, чтобы человек успел продлить её.'
+            ),
+            'format': 'false — выключен, observe — только журнал, true — включён, drain — доводит открытые сессии.',
+            'example': 'false',
+            'warning': (
+                'Режим читается один раз при старте бота — сохранённое значение начнёт действовать только '
+                'после перезапуска. С true и незаполненными сквадами бот запустится с выключенным grace.'
+            ),
+            'dependencies': 'GRACE_ACCESS_EXPIRED_SQUAD_UUID, GRACE_ACCESS_LIMITED_SQUAD_UUID, GRACE_ACCESS_TRAFFIC_GB',
+        },
+        'GRACE_ACCESS_EXPIRED_SQUAD_UUID': {
+            'description': 'Сквад, в который переводится пользователь с истёкшей подпиской на время grace-доступа.',
+            'format': 'UUID сквада из панели RemnaWave.',
+            'example': '3fa85f64-5717-4562-b3fc-2c963f66afa6',
+            'warning': 'Обязателен при режиме true. Пустое или некорректное значение отключает grace при старте.',
+        },
+        'GRACE_ACCESS_LIMITED_SQUAD_UUID': {
+            'description': 'Сквад для подписки, упёршейся в лимит трафика, на время grace-доступа.',
+            'format': 'UUID сквада из панели RemnaWave.',
+            'example': '3fa85f64-5717-4562-b3fc-2c963f66afa6',
+            'warning': 'Обязателен при режиме true. Пустое или некорректное значение отключает grace при старте.',
+        },
+        'GRACE_ACCESS_EXTERNAL_SQUAD_UUID': {
+            'description': 'Что делать с внешним сквадом пользователя на время grace-доступа.',
+            'format': 'Пусто — отцепить, keep — оставить как есть, либо UUID аварийного сквада.',
+            'example': 'keep',
+            'warning': 'Исходное состояние сохраняется в снимке сессии и возвращается при завершении grace.',
+        },
+        'GRACE_ACCESS_TRAFFIC_GB': {
+            'description': 'Лимит трафика, который выдаётся на время grace-доступа.',
+            'format': 'Целое число гигабайт.',
+            'example': '1',
+            'warning': 'При режиме true должно быть не меньше 1, иначе grace выключится при старте.',
+        },
+        'GRACE_ACCESS_DURATION_HOURS': {
+            'description': 'Сколько действует grace-доступ, если подписку так и не продлили.',
+            'format': 'Целое число часов.',
+            'example': '72',
+            'warning': 'По истечении срока панельное состояние возвращается к исходному из снимка сессии.',
+        },
+        'GRACE_ACCESS_NOTIFY_ADMINS': {
+            'description': 'Сообщать админам в чат уведомлений о каждой выдаче и завершении grace-доступа: кому, почему, до какого срока и чем закончилось.',
+            'format': 'Булево значение.',
+            'example': 'true',
+            'dependencies': 'ADMIN_NOTIFICATIONS_ENABLED, ADMIN_NOTIFICATIONS_RENEWALS_ENABLED',
+        },
+        'GRACE_ACCESS_ALLOWED_SERVICES': {
+            'description': 'Что остаётся доступным во время grace — так, как это увидит человек в сообщении бота и в письме: «Telegram», «Telegram и личный кабинет», «сайт проекта». Сам доступ определяют ноды сквада grace, бот только сообщает.',
+            'format': 'Короткая фраза.',
+            'example': 'Telegram и личный кабинет',
+        },
+        'GRACE_ACCESS_NOTIFY_USER': {
+            'description': 'Сообщать человеку в бота, что подписка закончилась, но на время grace оставлен доступ к тому, что названо в GRACE_ACCESS_ALLOWED_SERVICES, и когда этот доступ закрылся.',
+            'format': 'Булево значение.',
+            'example': 'true',
+        },
+        'SALES_MODE': {
+            'description': (
+                'Режим продажи подписок. '
+                '«Классический» — выбор периода из .env (PRICE_14_DAYS и т.д.). '
+                '«Тарифы» — готовые тарифные планы из кабинета с серверами и лимитами.'
+            ),
+            'format': 'Выберите один из доступных режимов.',
+            'example': 'tariffs',
+            'warning': (
+                'При смене режима логика покупки подписки полностью меняется. '
+                'В режиме «Тарифы» пользователи выбирают готовый тарифный план.'
+            ),
+        },
+        'YOOKASSA_ENABLED': {
+            'description': (
+                'Включает оплату через YooKassa. Требует корректных идентификаторов магазина и секретного ключа.'
+            ),
+            'format': 'Булево значение: выберите "Включить" или "Выключить".',
+            'example': 'Включено при полностью настроенной интеграции.',
+            'warning': 'При включении без Shop ID и Secret Key пользователи увидят ошибки при оплате.',
+            'dependencies': 'YOOKASSA_SHOP_ID, YOOKASSA_SECRET_KEY, YOOKASSA_RETURN_URL',
+        },
+        'SIMPLE_SUBSCRIPTION_ENABLED': {
+            'description': 'Показывает в меню пункт с быстрой покупкой подписки.',
+            'format': 'Булево значение.',
+            'example': 'true',
+            'warning': 'Если остались не настроенные параметры, предложение может вести себя некорректно.',
+        },
+        'SIMPLE_SUBSCRIPTION_PERIOD_DAYS': {
+            'description': 'Период подписки, который предлагается при быстрой покупке.',
+            'format': 'Выберите один из доступных периодов.',
+            'example': '30 дн. — 990 ₽',
+            'warning': 'Не забудьте настроить цену периода в блоке «Стоимость тарифов».',
+        },
+        'SIMPLE_SUBSCRIPTION_DEVICE_LIMIT': {
+            'description': 'Сколько устройств получит пользователь вместе с подпиской по быстрой покупке.',
+            'format': 'Выберите число устройств.',
+            'example': '2 устройства',
+            'warning': 'Значение не должно превышать допустимый лимит в настройках подписок.',
+        },
+        'SIMPLE_SUBSCRIPTION_TRAFFIC_GB': {
+            'description': 'Объём трафика, включённый в простую подписку (0 = безлимит).',
+            'format': 'Выберите пакет трафика.',
+            'example': 'Безлимит',
+        },
+        'SIMPLE_SUBSCRIPTION_SQUAD_UUID': {
+            'description': (
+                'Привязка быстрой подписки к конкретному скваду. Оставьте пустым для любого доступного сервера.'
+            ),
+            'format': 'Выберите сквад из списка или очистите значение.',
+            'example': 'd4aa2b8c-9a36-4f31-93a2-6f07dad05fba',
+            'warning': 'Убедитесь, что выбранный сквад активен и доступен для подписки.',
+        },
+        'MAIN_MENU_RICH_ENABLED': {
+            'description': (
+                'Rich-меню (Bot API 10.1): главное меню с заголовками, таблицей подписок, '
+                'сворачиваемыми блоками акций и датами в часовом поясе пользователя (tg-time).'
+            ),
+            'format': 'Булево значение.',
+            'example': 'true',
+            'warning': (
+                'Требует telegram-bot-api с поддержкой Bot API 10.1 (официальный сервер поддерживает). '
+                'Если сервер не поддерживает rich-сообщения, бот сам вернётся к классическому меню до рестарта. '
+                'В rich-режиме главное меню отображается без логотипа (rich-сообщение не является фото), '
+                'а при включённом ENABLE_LOGO_MODE переходы меню и разделов пересоздают сообщение.'
+            ),
+            'dependencies': 'ENABLE_LOGO_MODE',
+        },
+        'MAIN_MENU_RICH_EFFECT_ID': {
+            'description': (
+                'Эффект сообщения (конфетти и т.п.) при отправке rich-меню новым сообщением. '
+                'Работает только в личных чатах и только при MAIN_MENU_RICH_ENABLED.'
+            ),
+            'format': 'Идентификатор эффекта Telegram или пустая строка (без эффекта).',
+            'example': '5046509860389126442',
+            'warning': (
+                'Известные id: 🎉 5046509860389126442, ❤️ 5044134455711629726, 🔥 5104841245755180586, '
+                '👍 5107584321108051014, 👎 5104858069142078462, 💩 5046589136895476101. '
+                'Если сервер отклонит эффект, бот отправит меню без него и отключит эффект до рестарта.'
+            ),
+            'dependencies': 'MAIN_MENU_RICH_ENABLED',
+        },
+        'MAIN_MENU_RICH_LOGO_URL': {
+            'description': (
+                'Публичный HTTPS-URL картинки-логотипа в шапке rich-меню. '
+                'Пусто — авто-режим: при заданном WEBHOOK_URL и существующем LOGO_FILE '
+                'логотип отдаётся эндпоинтом /cabinet/branding/bot-logo.'
+            ),
+            'format': 'HTTPS-URL картинки (png/jpg/webp) или пустая строка.',
+            'example': 'https://example.com/logo.png',
+            'warning': (
+                'URL должен быть доступен серверам Telegram. Если картинку скачать не удалось, '
+                'бот один раз повторит отправку без логотипа и отключит его до рестарта.'
+            ),
+            'dependencies': 'MAIN_MENU_RICH_ENABLED, WEBHOOK_URL, LOGO_FILE',
+        },
+        'ADMIN_NOTIFICATIONS_RICH_ENABLED': {
+            'description': (
+                'Rich-вид сообщений админ-чата (Bot API 10.1): заголовки и разделители у уведомлений, '
+                'таблица показателей в стартовом сообщении и отчётах, сворачиваемые трейсбеки '
+                'в error-отчётах (полный лог инлайн вместо .txt-файла).'
+            ),
+            'format': 'Булево значение.',
+            'example': 'true',
+            'warning': (
+                'Требует telegram-bot-api с Bot API 10.1 (официальный сервер поддерживает). '
+                'При недоступности бот сам вернётся к классическому виду до рестарта.'
+            ),
+            'dependencies': 'ADMIN_NOTIFICATIONS_ENABLED',
+        },
+        'MAIN_MENU_RICH_SUBSCRIPTIONS_COLLAPSIBLE': {
+            'description': (
+                'Сворачивать таблицу подписок rich-меню в раскрываемый блок, когда у пользователя '
+                'больше одной подписки (мультитарифный режим). Заголовок блока показывает счётчик.'
+            ),
+            'format': 'Булево значение.',
+            'example': 'true',
+            'warning': 'Действует только при MAIN_MENU_RICH_ENABLED и включённом мультитарифе.',
+            'dependencies': 'MAIN_MENU_RICH_ENABLED, MULTI_TARIFF_ENABLED',
+        },
+        'MAIN_MENU_RICH_INLINE_BUTTONS': {
+            'description': (
+                'Показывать кнопки ВНУТРИ полотна rich-сообщения (Bot API 10.3), а не отдельной '
+                'клавиатурой под ним. Действует и в главном меню, и в rich-уведомлениях админ-чата. '
+                'Клавиатура не дублируется: кнопки либо внутри, либо под сообщением.'
+            ),
+            'format': 'Булево значение.',
+            'example': 'false',
+            'warning': (
+                'Требует Bot API 10.3 на сервере. Если хотя бы одну кнопку сообщения нельзя '
+                'перенести (оплата, игра, а в групповом админ-чате — Mini App), клавиатура этого '
+                'сообщения целиком остаётся под ним: половина кнопок внутри — это потерянные кнопки.'
+            ),
+            'dependencies': 'MAIN_MENU_RICH_ENABLED, ADMIN_NOTIFICATIONS_RICH_ENABLED',
+        },
+        'USER_NOTIFICATIONS_RICH_ENABLED': {
+            'description': (
+                'Отправлять пользовательские уведомления (истечение подписки, автоплатёж, баланс, '
+                'рефералы, выплаты) rich-сообщением, как главное меню, а не обычным текстом. '
+                'Кнопки переезжают внутрь полотна, если включено MAIN_MENU_RICH_INLINE_BUTTONS.'
+            ),
+            'format': 'Булево значение.',
+            'example': 'true',
+            'warning': (
+                'Действует только при MAIN_MENU_RICH_ENABLED. Уведомления со сложной разметкой '
+                '(цитаты, списки, блоки кода) и уведомления мониторинга с логотипом уходят '
+                'классическим сообщением: rich-разметка их не воспроизводит дословно.'
+            ),
+            'dependencies': 'MAIN_MENU_RICH_ENABLED, MAIN_MENU_RICH_INLINE_BUTTONS',
+        },
+        'USER_ACTION_LOG_ENABLED': {
+            'description': (
+                'Лог действий пользователя: нажатия кнопок в боте и действия в кабинете. '
+                'Показывается на вкладке «Активность» в карточке юзера админ-кабинета.'
+            ),
+            'format': 'Булево значение.',
+            'example': 'true',
+            'warning': (
+                'Каждое нажатие кнопки — строка в button_click_logs. '
+                'Старые записи чистятся автоматически (USER_ACTION_LOG_RETENTION_DAYS).'
+            ),
+            'dependencies': 'USER_ACTION_LOG_RETENTION_DAYS',
+        },
+        'USER_ACTION_LOG_RETENTION_DAYS': {
+            'description': 'Сколько дней хранить записи лога действий пользователей (button_click_logs).',
+            'format': 'Целое число дней; 0 — не удалять.',
+            'example': '90',
+            'warning': 'Чистка выполняется раз в сутки циклом мониторинга.',
+            'dependencies': 'USER_ACTION_LOG_ENABLED',
+        },
+        'MULTI_TARIFF_ENABLED': {
+            'description': (
+                'Разрешает пользователям покупать несколько тарифов одновременно. '
+                'Каждый тариф создаёт отдельную подписку с собственными серверами и лимитами.'
+            ),
+            'format': 'Булево значение.',
+            'example': 'true',
+            'warning': (
+                'Работает только в режиме продаж «Тарифы». '
+                'При включении синхронизация с панелью переключается на мультитарифный режим.'
+            ),
+            'dependencies': 'SALES_MODE=tariffs, MAX_ACTIVE_SUBSCRIPTIONS',
+        },
+        'MAX_ACTIVE_SUBSCRIPTIONS': {
+            'description': (
+                'Максимальное количество одновременных активных подписок у одного пользователя. '
+                'Применяется только в мультитарифном режиме.'
+            ),
+            'format': 'Целое число от 1 и выше.',
+            'example': '10',
+            'warning': 'Большое значение может усложнить управление подписками для пользователя.',
+            'dependencies': 'MULTI_TARIFF_ENABLED',
+        },
+        'DEVICES_SELECTION_ENABLED': {
+            'description': 'Разрешает пользователям выбирать количество устройств при покупке и продлении подписки.',
+            'format': 'Булево значение.',
+            'example': 'false',
+            'warning': 'При отключении пользователи не смогут докупать устройства из интерфейса бота.',
+        },
+        'DEVICES_SELECTION_DISABLED_AMOUNT': {
+            'description': (
+                'Лимит устройств, который автоматически назначается, когда выбор количества устройств выключен. '
+                'Значение 0 отключает назначение устройств.'
+            ),
+            'format': 'Целое число от 0 и выше.',
+            'example': '3',
+            'warning': 'При 0 RemnaWave не получит лимит устройств, пользователям не показываются цифры в интерфейсе.',
+        },
+        'CRYPTOBOT_ENABLED': {
+            'description': 'Разрешает принимать криптоплатежи через CryptoBot.',
+            'format': 'Булево значение.',
+            'example': 'Включите после указания токена API и секрета вебхука.',
+            'warning': 'Пустой токен или неверный вебхук приведут к отказам платежей.',
+            'dependencies': 'CRYPTOBOT_API_TOKEN',
+        },
+        'PAYMENT_VERIFICATION_AUTO_CHECK_ENABLED': {
+            'description': (
+                'Запускает фоновую проверку ожидающих пополнений и повторно обращается '
+                'к платёжным провайдерам без участия администратора.'
+            ),
+            'format': 'Булево значение.',
+            'example': 'Включено, чтобы автоматически перепроверять зависшие платежи.',
+            'warning': 'Требует активных интеграций YooKassa, {mulenpay_name}, PayPalych, WATA или CryptoBot.',
+        },
+        'PAYMENT_VERIFICATION_AUTO_CHECK_INTERVAL_MINUTES': {
+            'description': ('Интервал между автоматическими проверками ожидающих пополнений в минутах.'),
+            'format': 'Целое число не меньше 1.',
+            'example': '10',
+            'warning': 'Слишком малый интервал может привести к частым обращениям к платёжным API.',
+            'dependencies': 'PAYMENT_VERIFICATION_AUTO_CHECK_ENABLED',
+        },
+        'BASE_PROMO_GROUP_PERIOD_DISCOUNTS_ENABLED': {
+            'description': ('Включает применение базовых скидок на периоды подписок в групповых промо.'),
+            'format': 'Булево значение.',
+            'example': 'true',
+            'warning': 'Скидки применяются только если указаны корректные пары периодов и процентов.',
+        },
+        'BASE_PROMO_GROUP_PERIOD_DISCOUNTS': {
+            'description': ('Список скидок для групп: каждая пара задаёт дни периода и процент скидки.'),
+            'format': 'Через запятую пары вида &lt;дней&gt;:&lt;скидка&gt;.',
+            'example': '30:10,60:20,90:30,180:50,360:65',
+            'warning': 'Некорректные записи будут проигнорированы. Процент ограничен 0-100.',
+        },
+        'AUTO_PURCHASE_AFTER_TOPUP_ENABLED': {
+            'description': (
+                'При достаточном балансе автоматически оформляет сохранённую подписку сразу после пополнения.'
+            ),
+            'format': 'Булево значение.',
+            'example': 'true',
+            'warning': ('Используйте с осторожностью: средства будут списаны мгновенно, если корзина найдена.'),
+        },
+        'SUPPORT_TICKET_SLA_MINUTES': {
+            'description': 'Лимит времени для ответа модераторов на тикет в минутах.',
+            'format': 'Целое число от 1 до 1440.',
+            'example': '5',
+            'warning': 'Слишком низкое значение может вызвать частые напоминания, слишком высокое — ухудшить SLA.',
+            'dependencies': 'SUPPORT_TICKET_SLA_ENABLED, SUPPORT_TICKET_SLA_REMINDER_COOLDOWN_MINUTES',
+        },
+        'MAINTENANCE_MODE': {
+            'description': 'Переводит бота в режим технического обслуживания и скрывает действия для пользователей.',
+            'format': 'Булево значение.',
+            'example': 'Включено на время плановых работ.',
+            'warning': 'Не забудьте отключить после завершения работ, иначе бот останется недоступен.',
+            'dependencies': 'MAINTENANCE_MESSAGE, MAINTENANCE_CHECK_INTERVAL',
+        },
+        'MAINTENANCE_MONITORING_ENABLED': {
+            'description': ('Управляет автоматическим запуском мониторинга панели Remnawave при старте бота.'),
+            'format': 'Булево значение.',
+            'example': 'false',
+            'warning': ('При отключении мониторинг можно запустить вручную из панели администратора.'),
+            'dependencies': 'MAINTENANCE_CHECK_INTERVAL',
+        },
+        'MAINTENANCE_RETRY_ATTEMPTS': {
+            'description': ('Сколько раз повторять проверку панели Remnawave перед фиксацией недоступности.'),
+            'format': 'Целое число не меньше 1.',
+            'example': '3',
+            'warning': (
+                'Большие значения увеличивают время реакции на реальные сбои, но помогают избежать ложных срабатываний.'
+            ),
+            'dependencies': 'MAINTENANCE_CHECK_INTERVAL',
+        },
+        'DISPLAY_NAME_BANNED_KEYWORDS': {
+            'description': (
+                'Список слов и фрагментов, при наличии которых в отображаемом имени пользователь будет заблокирован.'
+            ),
+            'format': 'Перечислите ключевые слова через запятую или с новой строки.',
+            'example': 'support, security, служебн',
+            'warning': 'Слишком агрессивные фильтры могут блокировать добросовестных пользователей.',
+            'dependencies': 'Фильтр отображаемых имен',
+        },
+        'REMNAWAVE_API_URL': {
+            'description': 'Базовый адрес панели RemnaWave, с которой синхронизируется бот.',
+            'format': 'Полный URL вида https://panel.example.com.',
+            'example': 'https://panel.remnawave.net',
+            'warning': 'Недоступный адрес приведет к ошибкам при управлении VPN-учетками.',
+            'dependencies': 'REMNAWAVE_API_KEY или REMNAWAVE_USERNAME/REMNAWAVE_PASSWORD',
+        },
+        'REMNAWAVE_AUTO_SYNC_ENABLED': {
+            'description': 'Автоматически запускает синхронизацию пользователей и серверов с панелью RemnaWave.',
+            'format': 'Булево значение.',
+            'example': 'Включено при корректно настроенных API-ключах.',
+            'warning': 'При включении без расписания синхронизация не будет выполнена.',
+            'dependencies': 'REMNAWAVE_AUTO_SYNC_TIMES',
+        },
+        'REMNAWAVE_AUTO_SYNC_TIMES': {
+            'description': (
+                'Список времени в формате HH:MM в часовом поясе бота (TIMEZONE), '
+                'когда запускается автосинхронизация в течение суток.'
+            ),
+            'format': 'Перечислите время через запятую или с новой строки (например, 03:00, 15:00).',
+            'example': '03:00, 15:00',
+            'warning': (
+                'Минимальный интервал между запусками не ограничен, но слишком частые синхронизации нагружают панель.'
+            ),
+            'dependencies': 'REMNAWAVE_AUTO_SYNC_ENABLED',
+        },
+        'REMNAWAVE_API_REQUESTS_PER_MINUTE': {
+            'description': (
+                'Потолок запросов бота к панели RemnaWave в минуту. Нужен, если перед панелью '
+                'стоит прокси с лимитом частоты (например, rate_limit в Caddy) и адрес бота из него '
+                'не исключён: тогда массовая синхронизация упирается в лимит и ловит ошибки 429.'
+            ),
+            'format': 'Целое число. 0 — без ограничения.',
+            'example': '90 при лимите прокси 100 запросов в минуту.',
+            'warning': 'С потолком синхронизация тысяч подписок идёт часами; лучше исключить адрес бота в прокси.',
+            'dependencies': 'REMNAWAVE_API_URL',
+        },
+        'REMNAWAVE_USER_DESCRIPTION_TEMPLATE': {
+            'description': (
+                'Шаблон текста, который бот передает в поле Description при создании '
+                'или обновлении пользователя в панели RemnaWave.'
+            ),
+            'format': ('Доступные плейсхолдеры: {full_name}, {username}, {username_clean}, {telegram_id}.'),
+            'example': 'Bot user: {full_name} {username}',
+            'warning': 'Плейсхолдер {username} автоматически очищается, если у пользователя нет @username.',
+        },
+        'REMNAWAVE_USER_USERNAME_TEMPLATE': {
+            'description': (
+                'Шаблон имени пользователя, которое создаётся в панели RemnaWave для телеграм-пользователя.'
+            ),
+            'format': ('Доступные плейсхолдеры: {full_name}, {username}, {username_clean}, {telegram_id}.'),
+            'example': 'vpn_{username_clean}_{telegram_id}',
+            'warning': (
+                'Недопустимые символы автоматически заменяются на подчёркивания. '
+                'Если результат пустой, используется user_{telegram_id}.'
+            ),
+        },
+        'TRIAL_USER_TAG': {
+            'description': (
+                'Тег, который бот передаст пользователю при активации триальной подписки в панели RemnaWave.'
+            ),
+            'format': 'До 16 символов: заглавные A-Z, цифры и подчёркивание.',
+            'example': 'TRIAL_USER',
+            'warning': 'Неверный формат будет проигнорирован при создании пользователя.',
+            'dependencies': 'Активация триала и включенная интеграция с RemnaWave',
+        },
+        'PAID_SUBSCRIPTION_USER_TAG': {
+            'description': ('Тег, который бот ставит пользователю при покупке платной подписки в панели RemnaWave.'),
+            'format': 'До 16 символов: заглавные A-Z, цифры и подчёркивание.',
+            'example': 'PAID_USER',
+            'warning': 'Если тег не задан или невалиден, существующий тег не будет изменён.',
+            'dependencies': 'Оплата подписки и интеграция с RemnaWave',
+        },
+        'CABINET_REMNA_SUB_CONFIG': {
+            'description': (
+                'UUID конфигурации страницы подписки из RemnaWave. '
+                'Позволяет синхронизировать список приложений напрямую из панели.'
+            ),
+            'format': 'UUID конфигурации из раздела Subscription Page Configs в RemnaWave.',
+            'example': 'd4aa2b8c-9a36-4f31-93a2-6f07dad05fba',
+            'warning': 'Убедитесь, что конфигурация существует в панели и содержит нужные приложения.',
+            'dependencies': 'Настроенное подключение к RemnaWave API',
+        },
+        'TRAFFIC_MONITORING_ENABLED': {
+            'description': (
+                'Включает автоматический мониторинг трафика пользователей. '
+                'Система отслеживает изменения трафика (дельту) и сохраняет snapshot в Redis. '
+                'При превышении порогов отправляются уведомления пользователям и админам.'
+            ),
+            'format': 'Булево значение.',
+            'example': 'true',
+            'warning': (
+                'Требует настроенного подключения к Redis. '
+                'При включении будет запущен фоновый мониторинг трафика по расписанию.'
+            ),
+            'dependencies': 'Redis, TRAFFIC_MONITORING_INTERVAL_HOURS, TRAFFIC_SNAPSHOT_TTL_HOURS',
+        },
+        'TRAFFIC_MONITORING_INTERVAL_HOURS': {
+            'description': (
+                'Интервал проверки трафика в часах. '
+                'Каждые N часов система проверяет трафик всех активных пользователей и сравнивает с предыдущим snapshot.'
+            ),
+            'format': 'Целое число часов (минимум 1).',
+            'example': '24',
+            'warning': (
+                'Слишком маленький интервал может создать большую нагрузку на RemnaWave API. '
+                'Рекомендуется 24 часа для ежедневного мониторинга.'
+            ),
+            'dependencies': 'TRAFFIC_MONITORING_ENABLED',
+        },
+        'TRAFFIC_MONITORED_NODES': {
+            'description': (
+                'Список UUID нод для мониторинга трафика через запятую. '
+                'Если пусто - мониторятся все ноды. '
+                'Позволяет ограничить мониторинг только определенными серверами.'
+            ),
+            'format': 'UUID через запятую или пусто для всех нод.',
+            'example': 'd4aa2b8c-9a36-4f31-93a2-6f07dad05fba, a1b2c3d4-5678-90ab-cdef-1234567890ab',
+            'warning': 'UUID должны существовать в RemnaWave, иначе мониторинг не будет работать.',
+            'dependencies': 'TRAFFIC_MONITORING_ENABLED',
+        },
+        'TRAFFIC_SNAPSHOT_TTL_HOURS': {
+            'description': (
+                'Время жизни (TTL) snapshot трафика в Redis в часах. '
+                'Snapshot используется для вычисления дельты (изменения трафика) между проверками. '
+                'После истечения TTL snapshot удаляется и создается новый.'
+            ),
+            'format': 'Целое число часов (минимум 1).',
+            'example': '24',
+            'warning': (
+                'TTL должен быть >= интервала мониторинга. '
+                'Если TTL меньше интервала, snapshot будет удален до следующей проверки.'
+            ),
+            'dependencies': 'TRAFFIC_MONITORING_ENABLED, Redis',
+        },
+        'TRAFFIC_FAST_CHECK_ENABLED': {
+            'description': (
+                'Включает быструю проверку трафика. '
+                'Система сравнивает текущий трафик со snapshot и уведомляет о превышениях дельты.'
+            ),
+            'format': 'Булево значение.',
+            'example': 'true',
+            'warning': 'Требует Redis для хранения snapshot. При отключении проверки не выполняются.',
+            'dependencies': 'Redis, TRAFFIC_FAST_CHECK_INTERVAL_MINUTES, TRAFFIC_FAST_CHECK_THRESHOLD_GB',
+        },
+        'TRAFFIC_FAST_CHECK_INTERVAL_MINUTES': {
+            'description': 'Интервал быстрой проверки трафика в минутах.',
+            'format': 'Целое число минут (минимум 1).',
+            'example': '10',
+            'warning': 'Слишком малый интервал создаёт нагрузку на Remnawave API.',
+            'dependencies': 'TRAFFIC_FAST_CHECK_ENABLED',
+        },
+        'TRAFFIC_FAST_CHECK_THRESHOLD_GB': {
+            'description': 'Порог дельты трафика в ГБ для быстрой проверки. При превышении отправляется уведомление.',
+            'format': 'Число с плавающей точкой.',
+            'example': '5.0',
+            'warning': 'Слишком низкий порог приведёт к частым уведомлениям.',
+            'dependencies': 'TRAFFIC_FAST_CHECK_ENABLED',
+        },
+        'TRAFFIC_DAILY_CHECK_ENABLED': {
+            'description': 'Включает суточную проверку трафика через bandwidth-stats API.',
+            'format': 'Булево значение.',
+            'example': 'true',
+            'warning': 'Проверка выполняется в указанное время (TRAFFIC_DAILY_CHECK_TIME).',
+            'dependencies': 'TRAFFIC_DAILY_CHECK_TIME, TRAFFIC_DAILY_THRESHOLD_GB',
+        },
+        'TRAFFIC_DAILY_CHECK_TIME': {
+            'description': 'Время суточной проверки трафика в формате HH:MM в часовом поясе бота (TIMEZONE).',
+            'format': 'Строка времени HH:MM.',
+            'example': '00:00',
+            'warning': 'Время указывается в часовом поясе бота (TIMEZONE), а не в UTC.',
+            'dependencies': 'TRAFFIC_DAILY_CHECK_ENABLED',
+        },
+        'TRAFFIC_DAILY_THRESHOLD_GB': {
+            'description': 'Порог суточного трафика в ГБ. При превышении за 24 часа отправляется уведомление.',
+            'format': 'Число с плавающей точкой.',
+            'example': '50.0',
+            'warning': 'Учитывается весь трафик за последние 24 часа.',
+            'dependencies': 'TRAFFIC_DAILY_CHECK_ENABLED',
+        },
+        'TRAFFIC_NOTIFICATION_COOLDOWN_MINUTES': {
+            'description': 'Кулдаун уведомлений по одному пользователю в минутах.',
+            'format': 'Целое число минут.',
+            'example': '60',
+            'warning': 'Защита от спама уведомлениями по одному и тому же пользователю.',
+        },
+        'REMNAWAVE_WEBHOOK_NOTIFY_NODE_CONNECTION_STATUS': {
+            'description': (
+                'Уведомления администраторам о потере и восстановлении соединения с нодами из webhook-ов RemnaWave.'
+            ),
+            'format': 'Булево значение.',
+            'example': 'false',
+            'warning': (
+                'Отключает только события node.connection_lost и node.connection_restored. '
+                'Остальные инфраструктурные уведомления продолжают отправляться.'
+            ),
+            'dependencies': 'REMNAWAVE_WEBHOOK_ENABLED, ADMIN_NOTIFICATIONS_ENABLED',
+        },
+        'WEBHOOK_NOTIFY_USER_ENABLED': {
+            'description': (
+                'Глобальный переключатель уведомлений пользователям от вебхуков RemnaWave. '
+                'При выключении ни одно уведомление не отправляется, независимо от остальных настроек.'
+            ),
+            'format': 'Булево значение.',
+            'example': 'true',
+        },
+        'WEBHOOK_NOTIFY_SUB_STATUS': {
+            'description': 'Уведомления об отключении и активации подписки администратором.',
+            'format': 'Булево значение.',
+            'example': 'true',
+        },
+        'WEBHOOK_NOTIFY_SUB_EXPIRED': {
+            'description': 'Уведомления об истечении подписки.',
+            'format': 'Булево значение.',
+            'example': 'true',
+        },
+        'WEBHOOK_NOTIFY_SUB_EXPIRING': {
+            'description': 'Предупреждения о скором истечении подписки (72ч, 48ч, 24ч до окончания).',
+            'format': 'Булево значение.',
+            'example': 'true',
+        },
+        'WEBHOOK_NOTIFY_SUB_LIMITED': {
+            'description': 'Уведомление при достижении лимита трафика.',
+            'format': 'Булево значение.',
+            'example': 'true',
+        },
+        'WEBHOOK_NOTIFY_TRAFFIC_RESET': {
+            'description': 'Уведомление о сбросе счётчика трафика.',
+            'format': 'Булево значение.',
+            'example': 'true',
+        },
+        'WEBHOOK_NOTIFY_SUB_DELETED': {
+            'description': 'Уведомление при удалении пользователя из панели.',
+            'format': 'Булево значение.',
+            'example': 'true',
+        },
+        'WEBHOOK_NOTIFY_SUB_REVOKED': {
+            'description': 'Уведомление при обновлении ключей подписки (revoke).',
+            'format': 'Булево значение.',
+            'example': 'true',
+        },
+        'WEBHOOK_NOTIFY_FIRST_CONNECTED': {
+            'description': 'Уведомление при первом подключении к VPN.',
+            'format': 'Булево значение.',
+            'example': 'true',
+        },
+        'WEBHOOK_NOTIFY_NOT_CONNECTED': {
+            'description': 'Напоминание, что пользователь ещё не подключился к VPN.',
+            'format': 'Булево значение.',
+            'example': 'true',
+        },
+        'WEBHOOK_NOTIFY_BANDWIDTH_THRESHOLD': {
+            'description': 'Предупреждение при приближении к лимиту трафика (порог в %).',
+            'format': 'Булево значение.',
+            'example': 'true',
+        },
+        'WEBHOOK_NOTIFY_DEVICES': {
+            'description': 'Уведомления о подключении и отключении устройств.',
+            'format': 'Булево значение.',
+            'example': 'true',
+        },
+        'WEBHOOK_NOTIFY_TORRENT_DETECTED': {
+            'description': 'Уведомление пользователю при обнаружении торрент-трафика.',
+            'format': 'Булево значение.',
+            'example': 'true',
+        },
+        'RESET_TRAFFIC_ON_TARIFF_SWITCH': {
+            'description': (
+                'Автоматически сбрасывает счётчик использованного трафика '
+                'при переключении пользователя на другой тарифный план. '
+                'Сброс происходит через RemnaWave API.'
+            ),
+            'format': 'Булево значение: выберите "Включить" или "Выключить".',
+            'example': 'Включено — трафик обнуляется при каждой смене тарифа.',
+            'warning': 'При отключении использованный трафик сохранится после смены тарифа.',
+        },
+        'RESET_TRAFFIC_ON_PAYMENT': {
+            'description': (
+                'Автоматически сбрасывает счётчик использованного трафика при любой оплате или продлении подписки.'
+            ),
+            'format': 'Булево значение: выберите "Включить" или "Выключить".',
+            'example': 'Выключено по умолчанию.',
+            'warning': (
+                'При включении трафик будет обнуляться при каждом продлении подписки, '
+                'включая суточное списание — то есть раз в сутки.'
+            ),
+        },
+        'TELEGRAM_WIDGET_SIZE': {
+            'description': 'Размер кнопки виджета Telegram на странице авторизации.',
+            'format': 'Выберите один из доступных размеров.',
+            'example': 'large',
+        },
+        'TELEGRAM_WIDGET_RADIUS': {
+            'description': 'Радиус скругления углов кнопки виджета Telegram (в пикселях).',
+            'format': 'Целое число от 0 до 20.',
+            'example': '8',
+            'warning': 'Максимум: 20 для large, 14 для medium, 10 для small.',
+        },
+        'TELEGRAM_WIDGET_USERPIC': {
+            'description': 'Показывать ли аватар пользователя в виджете Telegram после авторизации.',
+            'format': 'Булево значение.',
+            'example': 'true',
+        },
+        'TELEGRAM_WIDGET_REQUEST_ACCESS': {
+            'description': 'Запрашивать ли у пользователя разрешение на отправку сообщений боту.',
+            'format': 'Булево значение.',
+            'example': 'true',
+            'warning': 'При отключении бот не сможет писать пользователю первым.',
+        },
+        'TELEGRAM_OIDC_ENABLED': {
+            'description': 'Включить авторизацию через новый Telegram Login (OpenID Connect). При включении заменяет legacy виджет.',
+            'format': 'Булево значение.',
+            'example': 'true',
+            'warning': 'Требует заполнения CLIENT_ID и CLIENT_SECRET из BotFather.',
+        },
+        'TELEGRAM_OIDC_CLIENT_ID': {
+            'description': 'ID бота (числовой) из BotFather > Bot Settings > Web Login.',
+            'format': 'Числовой ID бота.',
+            'example': '8521897198',
+            'warning': 'Должен совпадать с ID бота, используемого для авторизации.',
+        },
+        'TELEGRAM_OIDC_CLIENT_SECRET': {
+            'description': 'Секрет для OIDC из BotFather > Bot Settings > Web Login.',
+            'format': 'Строка-секрет.',
+            'example': 'xxxxxxxxxxxxxxxxxxxxxxxx',
+            'warning': 'НЕ совпадает с BOT_TOKEN. Получается отдельно в BotFather.',
+        },
+    }
+
+    @classmethod
+    def get_category_description(cls, category_key: str) -> str:
+        description = cls.CATEGORY_DESCRIPTIONS.get(category_key, '')
+        return cls._format_dynamic_copy(category_key, description)
+
+    @classmethod
+    def is_toggle(cls, key: str) -> bool:
+        definition = cls.get_definition(key)
+        return definition.python_type is bool
+
+    @classmethod
+    def is_read_only(cls, key: str) -> bool:
+        return key in cls.READ_ONLY_KEYS
+
+    @classmethod
+    def _is_env_override(cls, key: str) -> bool:
+        return key in cls._env_override_keys
+
+    @classmethod
+    def is_env_overridden(cls, key: str) -> bool:
+        return cls._is_env_override(key)
+
+    @classmethod
+    def _format_numeric_with_unit(cls, key: str, value: float) -> str | None:
+        if isinstance(value, bool):
+            return None
+        upper_key = key.upper()
+        # Денежные ключи содержат PRICE или оканчиваются на _KOPEKS; голое AMOUNT
+        # не признак цены (DEVICES_SELECTION_DISABLED_AMOUNT — количество устройств).
+        if any(suffix in upper_key for suffix in ('PRICE', '_KOPEKS')):
+            try:
+                return settings.format_price(int(value))
+            except Exception:
+                return f'{value}'
+        if upper_key.endswith('_PERCENT') or 'PERCENT' in upper_key:
+            return f'{value}%'
+        if upper_key.endswith('_HOURS'):
+            return f'{value} ч'
+        if upper_key.endswith('_MINUTES'):
+            return f'{value} мин'
+        if upper_key.endswith('_SECONDS'):
+            return f'{value} сек'
+        if upper_key.endswith('_DAYS'):
+            return f'{value} дн'
+        if upper_key.endswith('_GB'):
+            return f'{value} ГБ'
+        if upper_key.endswith('_MB'):
+            return f'{value} МБ'
+        return None
+
+    @classmethod
+    def _split_comma_values(cls, text: str) -> list[str] | None:
+        raw = (text or '').strip()
+        if not raw or ',' not in raw:
+            return None
+        parts = [segment.strip() for segment in raw.split(',') if segment.strip()]
+        return parts or None
+
+    @classmethod
+    def format_value_human(cls, key: str, value: Any) -> str:
+        if key == 'SIMPLE_SUBSCRIPTION_SQUAD_UUID':
+            if value is None:
+                return 'Любой доступный'
+            if isinstance(value, str):
+                cleaned_value = value.strip()
+                if not cleaned_value:
+                    return 'Любой доступный'
+
+        if value is None:
+            return '—'
+
+        if isinstance(value, bool):
+            return '✅ ВКЛЮЧЕНО' if value else '❌ ВЫКЛЮЧЕНО'
+
+        if isinstance(value, (int, float)):
+            formatted = cls._format_numeric_with_unit(key, value)
+            return formatted or str(value)
+
+        if isinstance(value, str):
+            cleaned = value.strip()
+            if not cleaned:
+                return '—'
+            if key in cls.PLAIN_TEXT_KEYS:
+                return cleaned
+            if cls.is_secret_key(key):
+                return cls.SECRET_MASK
+            items = cls._split_comma_values(cleaned)
+            if items:
+                return ', '.join(items)
+            return cleaned
+
+        if isinstance(value, (list, tuple, set)):
+            return ', '.join(str(item) for item in value)
+
+        if isinstance(value, dict):
+            try:
+                return json.dumps(value, ensure_ascii=False)
+            except Exception:
+                return str(value)
+
+        return str(value)
+
+    @classmethod
+    def get_setting_guidance(cls, key: str) -> dict[str, str]:
+        definition = cls.get_definition(key)
+        original = cls.get_original_value(key)
+        type_label = definition.type_label
+        hints = dict(cls.SETTING_HINTS.get(key, {}))
+
+        base_description = (
+            hints.get('description')
+            or f'Параметр <b>{definition.display_name}</b> управляет категорией «{definition.category_label}».'
+        )
+        base_format = hints.get('format') or (
+            'Булево значение (да/нет).'
+            if definition.python_type is bool
+            else 'Введите значение соответствующего типа (число или строку).'
+        )
+        example = hints.get('example') or (cls.format_value_human(key, original) if original is not None else '—')
+        warning = hints.get('warning') or ('Неверные значения могут привести к некорректной работе бота.')
+        dependencies = hints.get('dependencies') or definition.category_label
+
+        return {
+            'description': base_description,
+            'format': base_format,
+            'example': example,
+            'warning': warning,
+            'dependencies': dependencies,
+            'type': type_label,
+        }
+
+    _definitions: dict[str, SettingDefinition] = {}
+    _original_values: dict[str, Any] = settings.model_dump()
+    _overrides_raw: dict[str, str | None] = {}
+    _env_override_keys: set[str] = set(ENV_OVERRIDE_KEYS)
+    _callback_tokens: dict[str, str] = {}
+    _token_to_key: dict[str, str] = {}
+    _choice_tokens: dict[str, dict[Any, str]] = {}
+    _choice_token_lookup: dict[str, dict[str, Any]] = {}
+
+    @classmethod
+    def initialize_definitions(cls) -> None:
+        if cls._definitions:
+            return
+
+        for key, field in Settings.model_fields.items():
+            if key in cls.EXCLUDED_KEYS:
+                continue
+
+            annotation = field.annotation
+            python_type, is_optional = cls._normalize_type(annotation)
+            type_label = cls._type_to_label(python_type, is_optional)
+
+            category_key = cls._resolve_category_key(key)
+            category_label = cls.CATEGORY_TITLES.get(
+                category_key,
+                category_key.capitalize() if category_key else 'Прочее',
+            )
+            category_label = cls._format_dynamic_copy(category_key, category_label)
+
+            cls._definitions[key] = SettingDefinition(
+                key=key,
+                category_key=category_key or 'other',
+                category_label=category_label,
+                python_type=python_type,
+                type_label=type_label,
+                is_optional=is_optional,
+            )
+
+            cls._register_callback_token(key)
+            if key in cls.CHOICES:
+                cls._ensure_choice_tokens(key)
+
+    @classmethod
+    def _resolve_category_key(cls, key: str) -> str:
+        override = cls.CATEGORY_KEY_OVERRIDES.get(key)
+        if override:
+            return override
+
+        for prefix, category in sorted(
+            cls.CATEGORY_PREFIX_OVERRIDES.items(), key=lambda item: len(item[0]), reverse=True
+        ):
+            if key.startswith(prefix):
+                return category
+
+        if '_' not in key:
+            return key.upper()
+        prefix = key.split('_', 1)[0]
+        return prefix.upper()
+
+    @classmethod
+    def _normalize_type(cls, annotation: Any) -> tuple[type[Any], bool]:
+        if annotation is None:
+            return str, True
+
+        origin = get_origin(annotation)
+        if origin is Union:
+            args = [arg for arg in get_args(annotation) if arg is not type(None)]
+            if len(args) == 1:
+                nested_type, nested_optional = cls._normalize_type(args[0])
+                return nested_type, True
+            return str, True
+
+        if annotation in {int, float, bool, str}:
+            return annotation, False
+
+        if annotation in {Optional[int], Optional[float], Optional[bool], Optional[str]}:
+            nested = get_args(annotation)[0]
+            return nested, True
+
+        # Paths, lists, dicts и прочее будем хранить как строки
+        return str, False
+
+    @classmethod
+    def _type_to_label(cls, python_type: type[Any], is_optional: bool) -> str:
+        base = {
+            bool: 'bool',
+            int: 'int',
+            float: 'float',
+            str: 'str',
+        }.get(python_type, 'str')
+        return f'optional[{base}]' if is_optional else base
+
+    @classmethod
+    def get_categories(cls) -> list[tuple[str, str, int]]:
+        cls.initialize_definitions()
+        categories: dict[str, list[SettingDefinition]] = {}
+
+        for definition in cls._definitions.values():
+            categories.setdefault(definition.category_key, []).append(definition)
+
+        result: list[tuple[str, str, int]] = []
+        for category_key, items in categories.items():
+            label = items[0].category_label
+            result.append((category_key, label, len(items)))
+
+        result.sort(key=lambda item: item[1])
+        return result
+
+    @classmethod
+    def get_settings_for_category(cls, category_key: str) -> list[SettingDefinition]:
+        cls.initialize_definitions()
+        filtered = [definition for definition in cls._definitions.values() if definition.category_key == category_key]
+        filtered.sort(key=lambda definition: definition.key)
+        return filtered
+
+    @classmethod
+    def get_definition(cls, key: str) -> SettingDefinition:
+        cls.initialize_definitions()
+        return cls._definitions[key]
+
+    @classmethod
+    def has_override(cls, key: str) -> bool:
+        if cls._is_env_override(key):
+            return False
+        return key in cls._overrides_raw
+
+    @classmethod
+    def is_env_locked(cls, key: str) -> bool:
+        """True if the key is pinned in the environment (.env), so its value
+        shadows the DB and cannot be changed from the cabinet. Edits to such a
+        key would be silently discarded — callers must surface this instead."""
+        return cls._is_env_override(key)
+
+    @classmethod
+    def get_current_value(cls, key: str) -> Any:
+        return getattr(settings, key)
+
+    @classmethod
+    def get_original_value(cls, key: str) -> Any:
+        return cls._original_values.get(key)
+
+    @classmethod
+    def format_value(cls, value: Any) -> str:
+        if value is None:
+            return '—'
+        if isinstance(value, bool):
+            return '✅ Да' if value else '❌ Нет'
+        if isinstance(value, (int, float)):
+            return str(value)
+        if isinstance(value, (list, dict, tuple, set)):
+            try:
+                return json.dumps(value, ensure_ascii=False)
+            except Exception:
+                return str(value)
+        return str(value)
+
+    @classmethod
+    def format_value_for_list(cls, key: str) -> str:
+        value = cls.get_current_value(key)
+        formatted = cls.format_value_human(key, value)
+        if formatted == '—':
+            return formatted
+        return _truncate(formatted)
+
+    @staticmethod
+    def as_choice_key(value: Any) -> str:
+        """Значение в том виде, в котором его можно сравнить с ``ChoiceOption.value``.
+
+        Варианты всегда описаны СТРОКАМИ, а значение приходит уже приведённым к
+        типу настройки: у булевой это ``True``/``False``, у числовой — ``int``.
+        Прямое сравнение с ``'true'`` не совпадает никогда, и настройка с
+        вариантами становится несохраняемой — PUT отвечает 400 на любое значение,
+        включая перечисленные в самих вариантах.
+
+        Отдельной ветки для булевых не нужно: ``str(True).lower()`` и так даёт
+        ``'true'``. Числа при этом не сливаются с ними — ``1`` остаётся ``'1'``.
+        """
+        return str(value).strip().lower()
+
+    @classmethod
+    def value_matches_choice(cls, key: str, value: Any) -> bool:
+        """Допустимо ли значение для настройки с перечисленными вариантами.
+
+        Настройка без вариантов принимает что угодно: ограничение задаётся
+        именно списком, а не самим фактом проверки.
+        """
+        options = cls.get_choice_options(key)
+        if not options:
+            return True
+        return cls.as_choice_key(value) in {cls.as_choice_key(option.value) for option in options}
+
+    @classmethod
+    def get_choice_options(cls, key: str) -> list[ChoiceOption]:
+        cls.initialize_definitions()
+        dynamic = cls._get_dynamic_choice_options(key)
+        if dynamic is not None:
+            cls.CHOICES[key] = dynamic
+            cls._invalidate_choice_cache(key)
+            return dynamic
+        return cls.CHOICES.get(key, [])
+
+    @classmethod
+    def _invalidate_choice_cache(cls, key: str) -> None:
+        cls._choice_tokens.pop(key, None)
+        cls._choice_token_lookup.pop(key, None)
+
+    @classmethod
+    def _get_dynamic_choice_options(cls, key: str) -> list[ChoiceOption] | None:
+        if key == 'SIMPLE_SUBSCRIPTION_PERIOD_DAYS':
+            return cls._build_simple_subscription_period_choices()
+        if key == 'SIMPLE_SUBSCRIPTION_DEVICE_LIMIT':
+            return cls._build_simple_subscription_device_choices()
+        if key == 'SIMPLE_SUBSCRIPTION_TRAFFIC_GB':
+            return cls._build_simple_subscription_traffic_choices()
+        return None
+
+    @staticmethod
+    def _build_simple_subscription_period_choices() -> list[ChoiceOption]:
+        raw_periods = str(getattr(settings, 'AVAILABLE_SUBSCRIPTION_PERIODS', '') or '')
+        period_values: set[int] = set()
+
+        for segment in raw_periods.split(','):
+            segment = segment.strip()
+            if not segment:
+                continue
+            try:
+                period = int(segment)
+            except ValueError:
+                continue
+            if period > 0:
+                period_values.add(period)
+
+        fallback_period = getattr(settings, 'SIMPLE_SUBSCRIPTION_PERIOD_DAYS', 30) or 30
+        try:
+            fallback_period = int(fallback_period)
+        except (TypeError, ValueError):
+            fallback_period = 30
+        period_values.add(max(1, fallback_period))
+
+        options: list[ChoiceOption] = []
+        for days in sorted(period_values):
+            price_attr = f'PRICE_{days}_DAYS'
+            price_value = getattr(settings, price_attr, None)
+            if not isinstance(price_value, int):
+                price_value = settings.BASE_SUBSCRIPTION_PRICE
+
+            label = f'{days} дн.'
+            try:
+                if isinstance(price_value, int):
+                    label = f'{label} — {settings.format_price(price_value)}'
+            except Exception:
+                logger.debug('Не удалось форматировать цену для периода', days=days, exc_info=True)
+
+            options.append(ChoiceOption(days, label))
+
+        return options
+
+    @classmethod
+    def _build_simple_subscription_device_choices(cls) -> list[ChoiceOption]:
+        default_limit = getattr(settings, 'DEFAULT_DEVICE_LIMIT', 1) or 1
+        try:
+            default_limit = int(default_limit)
+        except (TypeError, ValueError):
+            default_limit = 1
+
+        max_limit = getattr(settings, 'MAX_DEVICES_LIMIT', default_limit) or default_limit
+        try:
+            max_limit = int(max_limit)
+        except (TypeError, ValueError):
+            max_limit = default_limit
+
+        current_limit = getattr(settings, 'SIMPLE_SUBSCRIPTION_DEVICE_LIMIT', default_limit) or default_limit
+        try:
+            current_limit = int(current_limit)
+        except (TypeError, ValueError):
+            current_limit = default_limit
+
+        upper_bound = max(default_limit, max_limit, current_limit, 1)
+        upper_bound = min(max(upper_bound, 1), 50)
+
+        options: list[ChoiceOption] = []
+        for count in range(1, upper_bound + 1):
+            label = f'{count} {cls._pluralize_devices(count)}'
+            if count == default_limit:
+                label = f'{label} (по умолчанию)'
+            options.append(ChoiceOption(count, label))
+
+        return options
+
+    @staticmethod
+    def _build_simple_subscription_traffic_choices() -> list[ChoiceOption]:
+        try:
+            packages = settings.get_traffic_packages()
+        except Exception as error:
+            logger.warning('Не удалось получить пакеты трафика', error=error, exc_info=True)
+            packages = []
+
+        traffic_values: set[int] = {0}
+        for package in packages:
+            gb_value = package.get('gb')
+            try:
+                gb = int(gb_value)
+            except (TypeError, ValueError):
+                continue
+            if gb >= 0:
+                traffic_values.add(gb)
+
+        default_limit = getattr(settings, 'DEFAULT_TRAFFIC_LIMIT_GB', 0) or 0
+        try:
+            default_limit = int(default_limit)
+        except (TypeError, ValueError):
+            default_limit = 0
+        if default_limit >= 0:
+            traffic_values.add(default_limit)
+
+        current_limit = getattr(settings, 'SIMPLE_SUBSCRIPTION_TRAFFIC_GB', default_limit)
+        try:
+            current_limit = int(current_limit)
+        except (TypeError, ValueError):
+            current_limit = default_limit
+        if current_limit >= 0:
+            traffic_values.add(current_limit)
+
+        options: list[ChoiceOption] = []
+        for gb in sorted(traffic_values):
+            if gb <= 0:
+                label = 'Безлимит'
+            else:
+                label = f'{gb} ГБ'
+
+            price_label = None
+            for package in packages:
+                try:
+                    package_gb = int(package.get('gb'))
+                except (TypeError, ValueError):
+                    continue
+                if package_gb != gb:
+                    continue
+                price_raw = package.get('price')
+                try:
+                    price_value = int(price_raw)
+                    if price_value >= 0:
+                        price_label = settings.format_price(price_value)
+                except (TypeError, ValueError):
+                    continue
+                break
+
+            if price_label:
+                label = f'{label} — {price_label}'
+
+            options.append(ChoiceOption(gb, label))
+
+        return options
+
+    @staticmethod
+    def _pluralize_devices(count: int) -> str:
+        count = abs(int(count))
+        last_two = count % 100
+        last_one = count % 10
+        if 11 <= last_two <= 14:
+            return 'устройств'
+        if last_one == 1:
+            return 'устройство'
+        if 2 <= last_one <= 4:
+            return 'устройства'
+        return 'устройств'
+
+    @classmethod
+    def has_choices(cls, key: str) -> bool:
+        return bool(cls.get_choice_options(key))
+
+    @classmethod
+    def get_callback_token(cls, key: str) -> str:
+        cls.initialize_definitions()
+        return cls._callback_tokens[key]
+
+    @classmethod
+    def resolve_callback_token(cls, token: str) -> str:
+        cls.initialize_definitions()
+        return cls._token_to_key[token]
+
+    @classmethod
+    def get_choice_token(cls, key: str, value: Any) -> str | None:
+        cls.initialize_definitions()
+        cls._ensure_choice_tokens(key)
+        return cls._choice_tokens.get(key, {}).get(value)
+
+    @classmethod
+    def resolve_choice_token(cls, key: str, token: str) -> Any:
+        cls.initialize_definitions()
+        cls._ensure_choice_tokens(key)
+        return cls._choice_token_lookup.get(key, {})[token]
+
+    @classmethod
+    def _register_callback_token(cls, key: str) -> None:
+        if key in cls._callback_tokens:
+            return
+
+        base = hashlib.blake2s(key.encode('utf-8'), digest_size=6).hexdigest()
+        candidate = base
+        counter = 1
+        while candidate in cls._token_to_key and cls._token_to_key[candidate] != key:
+            suffix = cls._encode_base36(counter)
+            candidate = f'{base}{suffix}'[:16]
+            counter += 1
+
+        cls._callback_tokens[key] = candidate
+        cls._token_to_key[candidate] = key
+
+    @classmethod
+    def _ensure_choice_tokens(cls, key: str) -> None:
+        if key in cls._choice_tokens:
+            return
+
+        options = cls.CHOICES.get(key, [])
+        value_to_token: dict[Any, str] = {}
+        token_to_value: dict[str, Any] = {}
+
+        for index, option in enumerate(options):
+            token = cls._encode_base36(index)
+            value_to_token[option.value] = token
+            token_to_value[token] = option.value
+
+        cls._choice_tokens[key] = value_to_token
+        cls._choice_token_lookup[key] = token_to_value
+
+    @staticmethod
+    def _encode_base36(number: int) -> str:
+        if number < 0:
+            raise ValueError('number must be non-negative')
+        alphabet = '0123456789abcdefghijklmnopqrstuvwxyz'
+        if number == 0:
+            return '0'
+        result = []
+        while number:
+            number, rem = divmod(number, 36)
+            result.append(alphabet[rem])
+        return ''.join(reversed(result))
+
+    @classmethod
+    async def initialize(cls, *, sync_web_api_token: bool = True) -> None:
+        """Загрузить настройки из БД в память.
+
+        `sync_web_api_token=False` — для одноразовых CLI: им нужны только
+        значения, а бутстрап токена веб-API пишет в БД, и холостой прогон
+        (который обещает «ничего не записано») перестал бы быть холостым.
+        """
+        cls.initialize_definitions()
+
+        async with AsyncSessionLocal() as session:
+            result = await session.execute(select(SystemSetting))
+            rows = result.scalars().all()
+
+        # Тот же ключ мог остаться и в .env — pydantic-settings его молча
+        # игнорирует (`extra='ignore'`), и это как раз тот канал, которым
+        # пользуется большинство инсталляций: снятая переменная была
+        # задокументирована в .env.example.
+        for retired_key, replacement in cls._RETIRED_SETTINGS.items():
+            if (os.environ.get(retired_key) or '').strip():
+                logger.warning(
+                    'Переменная окружения больше не поддерживается и НЕ применена',
+                    key=retired_key,
+                    replacement=replacement,
+                )
+
+        overrides: dict[str, str | None] = {}
+        for row in rows:
+            if row.key in cls._definitions:
+                overrides[row.key] = row.value
+            elif row.key in cls._RETIRED_SETTINGS and (row.value or '').strip():
+                # Строка настройки осталась от прежней версии и молча игнорируется —
+                # оператор считает, что настройка действует, а её нет. Для
+                # TRAFFIC_EXCLUDED_USER_UUIDS это особенно больно: список хранил
+                # UUID панельных юзеров, которых в 3.0.0 не существует, поэтому
+                # автоматически сконвертировать значения нельзя — нужно, чтобы
+                # человек заполнил новый ключ заново.
+                logger.warning(
+                    'Настройка из БД больше не поддерживается и НЕ применена',
+                    key=row.key,
+                    replacement=cls._RETIRED_SETTINGS[row.key],
+                )
+
+        for key, raw_value in overrides.items():
+            if cls._is_env_override(key):
+                logger.debug('Пропускаем настройку из БД: используется значение из окружения', key=key)
+                continue
+            try:
+                parsed_value = cls.deserialize_value(key, raw_value)
+            except Exception as error:
+                logger.error('Не удалось применить настройку', key=key, error=error)
+                continue
+
+            cls._overrides_raw[key] = raw_value
+            cls._apply_to_settings(key, parsed_value)
+
+        if sync_web_api_token:
+            await cls._sync_default_web_api_token()
+
+        # После загрузки всех overrides (включая SALES_MODE) — пересчитать цены,
+        # т.к. ensure_tariffs_synced мог загрузить тарифные цены до того как
+        # SALES_MODE=classic был применён из system_settings
+        refresh_period_prices()
+        refresh_classic_period_prices()
+
+    @classmethod
+    async def reload(cls) -> None:
+        cls._overrides_raw.clear()
+        await cls.initialize()
+
+    @classmethod
+    def deserialize_value(cls, key: str, raw_value: str | None) -> Any:
+        if raw_value is None:
+            return None
+
+        definition = cls.get_definition(key)
+        python_type = definition.python_type
+
+        if python_type is bool:
+            value_lower = raw_value.strip().lower()
+            if value_lower in {'1', 'true', 'on', 'yes', 'да'}:
+                return True
+            if value_lower in {'0', 'false', 'off', 'no', 'нет'}:
+                return False
+            raise ValueError(f'Неверное булево значение: {raw_value}')
+
+        if python_type is int:
+            return int(raw_value)
+
+        if python_type is float:
+            return float(raw_value)
+
+        return raw_value
+
+    @classmethod
+    def serialize_value(cls, key: str, value: Any) -> str | None:
+        if value is None:
+            return None
+
+        definition = cls.get_definition(key)
+        python_type = definition.python_type
+
+        if python_type is bool:
+            return 'true' if value else 'false'
+        if python_type in {int, float}:
+            return str(value)
+        return str(value)
+
+    @classmethod
+    def parse_user_value(cls, key: str, user_input: str) -> Any:
+        definition = cls.get_definition(key)
+        text = (user_input or '').strip()
+
+        if text.lower() in {'отмена', 'cancel'}:
+            raise ValueError('Ввод отменен пользователем')
+
+        if definition.is_optional and text.lower() in {'none', 'null', 'пусто', ''}:
+            return None
+
+        python_type = definition.python_type
+
+        if python_type is bool:
+            lowered = text.lower()
+            if lowered in {'1', 'true', 'on', 'yes', 'да', 'вкл', 'enable', 'enabled'}:
+                return True
+            if lowered in {'0', 'false', 'off', 'no', 'нет', 'выкл', 'disable', 'disabled'}:
+                return False
+            raise ValueError("Введите 'true' или 'false' (или 'да'/'нет')")
+
+        if python_type is int:
+            parsed_value: Any = int(text)
+        elif python_type is float:
+            parsed_value = float(text.replace(',', '.'))
+        else:
+            parsed_value = text
+
+        choices = cls.get_choice_options(key)
+        if choices:
+            allowed_values = {option.value for option in choices}
+            if python_type is str:
+                lowered_map = {str(option.value).lower(): option.value for option in choices}
+                normalized = lowered_map.get(str(parsed_value).lower())
+                if normalized is not None:
+                    parsed_value = normalized
+                elif parsed_value not in allowed_values:
+                    readable = ', '.join(f'{option.label} ({cls.format_value(option.value)})' for option in choices)
+                    raise ValueError(f'Доступные значения: {readable}')
+            elif parsed_value not in allowed_values:
+                readable = ', '.join(f'{option.label} ({cls.format_value(option.value)})' for option in choices)
+                raise ValueError(f'Доступные значения: {readable}')
+
+        return parsed_value
+
+    @classmethod
+    async def set_value(
+        cls,
+        db: AsyncSession,
+        key: str,
+        value: Any,
+        *,
+        force: bool = False,
+        commit: bool = True,
+    ) -> None:
+        """Сохранить настройку в БД и применить к живому процессу.
+
+        Коммит по умолчанию делает сама запись. Раньше запись только флашила, а
+        коммит оставался на вызывающем — и три ручки реферальной программы плюс
+        выключатель писем его не делали. Значение применялось к процессу
+        (админка показывала новое), а в базу не доезжало: сессия кабинета
+        закрывается без коммита. После перезапуска возвращалось старое, сколько
+        ни переключай.
+
+        ``commit=False`` — для пакетной записи, где несколько ключей должны
+        лечь одной транзакцией; такой вызывающий обязан коммитить сам.
+        """
+        if cls.is_read_only(key) and not force:
+            raise ReadOnlySettingError(f'Setting {key} is read-only')
+
+        raw_value = cls.serialize_value(key, value)
+        await upsert_system_setting(db, key, raw_value)
+        if commit:
+            await db.commit()
+        if cls._is_env_override(key):
+            logger.info('Настройка сохранена в БД, но не применена: значение задаётся через окружение', key=key)
+            cls._overrides_raw.pop(key, None)
+        else:
+            cls._overrides_raw[key] = raw_value
+            cls._apply_to_settings(key, value)
+
+        if key in {'WEB_API_DEFAULT_TOKEN', 'WEB_API_DEFAULT_TOKEN_NAME'}:
+            await cls._sync_default_web_api_token()
+
+        if key == 'SALES_MODE' and settings.is_tariffs_mode():
+            from app.database.crud.tariff import load_period_prices_from_db
+
+            await load_period_prices_from_db(db)
+
+    @classmethod
+    async def reset_value(
+        cls,
+        db: AsyncSession,
+        key: str,
+        *,
+        force: bool = False,
+        commit: bool = True,
+    ) -> None:
+        """Убрать настройку из БД и вернуть значение по умолчанию.
+
+        Коммит — как у ``set_value``: по умолчанию свой, ``commit=False`` для
+        пакетной записи.
+        """
+        if cls.is_read_only(key) and not force:
+            raise ReadOnlySettingError(f'Setting {key} is read-only')
+
+        await delete_system_setting(db, key)
+        if commit:
+            await db.commit()
+        cls._overrides_raw.pop(key, None)
+        if cls._is_env_override(key):
+            logger.info('Настройка сброшена в БД, используется значение из окружения', key=key)
+        else:
+            original = cls.get_original_value(key)
+            cls._apply_to_settings(key, original)
+
+        if key in {'WEB_API_DEFAULT_TOKEN', 'WEB_API_DEFAULT_TOKEN_NAME'}:
+            await cls._sync_default_web_api_token()
+
+        if key == 'SALES_MODE' and settings.is_tariffs_mode():
+            from app.database.crud.tariff import load_period_prices_from_db
+
+            await load_period_prices_from_db(db)
+
+    @classmethod
+    def _apply_to_settings(cls, key: str, value: Any) -> None:
+        if cls._is_env_override(key):
+            logger.debug('Пропуск применения настройки : значение задано через окружение', key=key)
+            return
+        try:
+            setattr(settings, key, value)
+            if key == 'SALES_MODE':
+                if settings.is_classic_mode():
+                    clear_db_period_prices()
+                refresh_period_prices()
+                refresh_classic_period_prices()
+            elif key in {
+                'PRICE_14_DAYS',
+                'PRICE_30_DAYS',
+                'PRICE_60_DAYS',
+                'PRICE_90_DAYS',
+                'PRICE_180_DAYS',
+                'PRICE_360_DAYS',
+            }:
+                refresh_period_prices()
+                refresh_classic_period_prices()
+            elif key.startswith('PRICE_TRAFFIC_') or key == 'TRAFFIC_PACKAGES_CONFIG':
+                refresh_traffic_prices()
+            elif key in {'REMNAWAVE_AUTO_SYNC_ENABLED', 'REMNAWAVE_AUTO_SYNC_TIMES'}:
+                try:
+                    from app.services.remnawave_sync_service import remnawave_sync_service
+
+                    remnawave_sync_service.schedule_refresh(
+                        run_immediately=(key == 'REMNAWAVE_AUTO_SYNC_ENABLED' and bool(value))
+                    )
+                except Exception as error:
+                    logger.error('Не удалось обновить сервис автосинхронизации RemnaWave', error=error)
+            elif key in {
+                'BACKUP_AUTO_ENABLED',
+                'BACKUP_INTERVAL_HOURS',
+                'BACKUP_TIME',
+                'BACKUP_MAX_KEEP',
+                'BACKUP_COMPRESSION',
+                'BACKUP_INCLUDE_LOGS',
+                'BACKUP_LOCATION',
+            }:
+                # Изменения настроек бекапа из кабинета — рестартим scheduler-таску,
+                # чтобы новые BACKUP_TIME/INTERVAL вступили в силу немедленно
+                # (без ожидания следующего цикла или рестарта бота).
+                try:
+                    import asyncio
+
+                    from app.services.backup_service import backup_service
+
+                    backup_service.reload_settings_from_db()
+                    if backup_service._settings.auto_backup_enabled:
+                        # Перезапускаем таску с пересчётом next_run на основе свежих настроек
+                        asyncio.create_task(backup_service.start_auto_backup())
+                    else:
+                        asyncio.create_task(backup_service.stop_auto_backup())
+                except Exception as error:
+                    logger.error('Не удалось применить новые настройки бекапа', error=error)
+            elif key in {
+                'REMNAWAVE_API_URL',
+                'REMNAWAVE_API_KEY',
+                'REMNAWAVE_SECRET_KEY',
+                'REMNAWAVE_USERNAME',
+                'REMNAWAVE_PASSWORD',
+                'REMNAWAVE_AUTH_TYPE',
+            }:
+                try:
+                    from app.services.remnawave_sync_service import remnawave_sync_service
+
+                    remnawave_sync_service.refresh_configuration()
+                except Exception as error:
+                    logger.error('Не удалось обновить конфигурацию сервиса автосинхронизации RemnaWave', error=error)
+        except Exception as error:
+            logger.error('Не удалось применить значение', key=key, setting_value=value, error=error)
+
+    @staticmethod
+    async def _sync_default_web_api_token() -> None:
+        default_token = (settings.WEB_API_DEFAULT_TOKEN or '').strip()
+        if not default_token:
+            return
+
+        success = await ensure_default_web_api_token()
+        if not success:
+            logger.warning(
+                'Не удалось синхронизировать бутстрап токен веб-API после обновления настроек',
+            )
+
+    @classmethod
+    def get_setting_summary(cls, key: str) -> dict[str, Any]:
+        definition = cls.get_definition(key)
+        current = cls.get_current_value(key)
+        original = cls.get_original_value(key)
+        has_override = cls.has_override(key)
+
+        return {
+            'key': key,
+            'name': definition.display_name,
+            'current': cls.format_value_human(key, current),
+            'original': cls.format_value_human(key, original),
+            'type': definition.type_label,
+            'category_key': definition.category_key,
+            'category_label': definition.category_label,
+            'has_override': has_override,
+            'is_read_only': cls.is_read_only(key),
+        }
+
+
+bot_configuration_service = BotConfigurationService

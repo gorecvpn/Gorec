@@ -1,0 +1,32 @@
+name: Lint
+
+on:
+  push:
+    branches: ['**']
+  pull_request:
+    branches: ['**']
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: astral-sh/setup-uv@v10.0.1
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.13'
+
+      - run: uv sync --frozen --group dev
+
+      - name: Check formatting
+        run: uv run ruff format --check .
+
+      - name: Check linting
+        run: uv run ruff check .
+
+      # Справка по структуре собирается из кода. Проверяем здесь, а не только
+      # тестом: так расхождение видно до прогона всего набора.
+      - name: Check structure reference is current
+        run: uv run python -m scripts.generate_structure_reference --check
