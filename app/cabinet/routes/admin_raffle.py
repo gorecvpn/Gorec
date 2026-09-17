@@ -14,6 +14,7 @@ from app.database.models import RaffleCampaignStatus, RafflePrizeType, RaffleWin
 from app.services.raffle.service import (
     DRAW_ALGORITHM,
     _normalize_prize_slots,
+    _normalize_tickets_by_tariff,
     draw_winners,
     max_winners_for_campaign,
     retry_award_winner,
