@@ -127,7 +127,10 @@ def tickets_count_for_purchase(campaign: RaffleCampaign, tariff_id: int | None) 
 def _looks_like_trial_purchase(tx: Transaction | None) -> bool:
     if tx is None:
         return False
-    if int(getattr(tx, 'amount_kopeks', 0) or 0) <= 0:
+    # SUBSCRIPTION_PAYMENT / GIFT_PAYMENT are stored as negative debits in
+    # create_transaction. Treat only a zero amount as free/trial — otherwise
+    # every paid purchase would be skipped when skip_trial_purchases=True.
+    if abs(int(getattr(tx, 'amount_kopeks', 0) or 0)) == 0:
         return True
     desc = (getattr(tx, 'description', None) or '').lower()
     external = (getattr(tx, 'external_id', None) or '').lower()
@@ -164,8 +167,8 @@ async def issue_for_purchase(
     if getattr(campaign, 'skip_trial_purchases', True):
         tx = await db.get(Transaction, transaction_id)
         if _looks_like_trial_purchase(tx):
-            logger.debug(
-                'Пропуск билета розыгрыша для trial-покупки',
+            logger.info(
+                'Пропуск билета розыгрыша для trial/бесплатной покупки',
                 transaction_id=transaction_id,
                 campaign_id=campaign.id,
             )

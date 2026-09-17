@@ -203,3 +203,71 @@ async def test_issue_uses_tickets_by_tariff(raffle_enabled, active_campaign, mon
     result = await raffle_service.issue_for_purchase(_stub_db(), user_id=42, transaction_id=900, tariff_id=3)
     assert len(result) == 3
     assert [t.ticket_index for t in result] == [0, 1, 2]
+
+
+async def test_issue_allows_paid_negative_amount_subscription(raffle_enabled, active_campaign, monkeypatch):
+    """Paid SUBSCRIPTION_PAYMENT rows store negative amount_kopeks — must still issue."""
+    active_campaign.skip_trial_purchases = True
+    created = SimpleNamespace(
+        id=11,
+        campaign_id=7,
+        user_id=42,
+        ticket_code='RAFFLE_PAID',
+        source_transaction_id=1001,
+        ticket_index=0,
+    )
+    monkeypatch.setattr(
+        raffle_service.raffle_crud,
+        'get_current_active_campaign',
+        AsyncMock(return_value=active_campaign),
+    )
+    monkeypatch.setattr(
+        raffle_service.raffle_crud,
+        'list_tickets_by_campaign_tx',
+        AsyncMock(return_value=[]),
+    )
+    create_ticket = AsyncMock(return_value=created)
+    monkeypatch.setattr(raffle_service.raffle_crud, 'create_ticket', create_ticket)
+    monkeypatch.setattr(raffle_service, '_notify_user_ticket', AsyncMock(return_value=None))
+
+    db = _stub_db()
+    db.get = AsyncMock(
+        return_value=SimpleNamespace(
+            amount_kopeks=-19900,  # 199 ₽ debit as stored by create_transaction
+            description="Покупка тарифа 'Premium' на 30 дней",
+            external_id=None,
+            payment_method='balance',
+        )
+    )
+    result = await raffle_service.issue_for_purchase(db, user_id=42, transaction_id=1001, tariff_id=3)
+    assert result == [created]
+    create_ticket.assert_awaited()
+
+
+async def test_issue_skips_zero_amount_as_trial(raffle_enabled, active_campaign, monkeypatch):
+    active_campaign.skip_trial_purchases = True
+    monkeypatch.setattr(
+        raffle_service.raffle_crud,
+        'get_current_active_campaign',
+        AsyncMock(return_value=active_campaign),
+    )
+    monkeypatch.setattr(
+        raffle_service.raffle_crud,
+        'list_tickets_by_campaign_tx',
+        AsyncMock(return_value=[]),
+    )
+    create_ticket = AsyncMock()
+    monkeypatch.setattr(raffle_service.raffle_crud, 'create_ticket', create_ticket)
+
+    db = _stub_db()
+    db.get = AsyncMock(
+        return_value=SimpleNamespace(
+            amount_kopeks=0,
+            description='activation',
+            external_id=None,
+            payment_method='balance',
+        )
+    )
+    result = await raffle_service.issue_for_purchase(db, user_id=42, transaction_id=2)
+    assert result == []
+    create_ticket.assert_not_called()

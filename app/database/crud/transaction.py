@@ -179,7 +179,7 @@ async def create_transaction(
 
                 await issue_for_purchase(db, user_id, transaction.id)
             except Exception as exc:
-                logger.debug('Не удалось выдать билет розыгрыша', user_id=user_id, exc=exc)
+                logger.warning('Не удалось выдать билет розыгрыша', user_id=user_id, exc=exc)
 
     return transaction
 
@@ -258,7 +258,7 @@ async def emit_transaction_side_effects(
 
             await issue_for_purchase(db, user_id, transaction.id)
         except Exception as exc:
-            logger.debug('Не удалось выдать билет розыгрыша', user_id=user_id, exc=exc)
+            logger.warning('Не удалось выдать билет розыгрыша', user_id=user_id, exc=exc)
 
 
 async def get_transaction_by_id(db: AsyncSession, transaction_id: int) -> Transaction | None:
