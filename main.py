@@ -440,7 +440,6 @@ async def main():
                 stage.warning(f'Ошибка запуска ротации игр: {e}')
                 logger.error('❌ Ошибка запуска ротации игр', error=e)
 
-
         if settings.is_log_rotation_enabled():
             async with timeline.stage(
                 'Ротация логов',
@@ -993,7 +992,6 @@ async def main():
             await contest_rotation_service.stop()
         except Exception as e:
             logger.error('Ошибка остановки ротации игр', error=e)
-
 
         if settings.is_log_rotation_enabled():
             logger.info('ℹ️ Остановка сервиса ротации логов...')
