@@ -133,7 +133,6 @@ class AdminRaffleCampaignDetailResponse(BaseModel):
     winners: list[AdminRaffleWinnerItem]
 
 
-
 def _slots_from_request(slots: list[PrizeSlotInput] | None) -> list[dict[str, Any]] | None:
     if slots is None:
         return None
@@ -157,6 +156,7 @@ def _slots_from_request(slots: list[PrizeSlotInput] | None) -> list[dict[str, An
     if not normalized:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail='Invalid prize_slots')
     return normalized
+
 
 def _validate_prize(prize_type: str, prize_value: int | None, prize_text: str | None) -> str:
     prize_type = (prize_type or RafflePrizeType.CUSTOM.value).lower()
@@ -296,7 +296,6 @@ async def create_raffle_campaign(
         prize_value = request.prize_value
         prize_text = request.prize_text
         max_winners = request.max_winners
-
 
     campaign = await raffle_crud.create_campaign(
         db,
@@ -492,8 +491,7 @@ async def update_raffle_campaign(
     }:
         # Disallow changing ticket issuance rules on live/closed campaigns
         if any(
-            k in provided
-            for k in ('tickets_per_purchase', 'tickets_by_tariff', 'skip_trial_purchases', 'starts_at')
+            k in provided for k in ('tickets_per_purchase', 'tickets_by_tariff', 'skip_trial_purchases', 'starts_at')
         ):
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
@@ -550,4 +548,3 @@ async def delete_raffle_campaign(
         force=force,
         admin_id=admin.id,
     )
-    return None
