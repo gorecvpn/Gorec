@@ -82,12 +82,8 @@ def resolve_prize_for_place(campaign: RaffleCampaign, place: int) -> dict[str, A
         if int(slot['place']) == int(place):
             return {
                 'prize_type': slot.get('prize_type') or campaign.prize_type,
-                'prize_value': slot.get('prize_value')
-                if slot.get('prize_value') is not None
-                else campaign.prize_value,
-                'prize_text': slot.get('prize_text')
-                if slot.get('prize_text') is not None
-                else campaign.prize_text,
+                'prize_value': slot.get('prize_value') if slot.get('prize_value') is not None else campaign.prize_value,
+                'prize_text': slot.get('prize_text') if slot.get('prize_text') is not None else campaign.prize_text,
             }
     return {
         'prize_type': campaign.prize_type,
@@ -101,7 +97,6 @@ def max_winners_for_campaign(campaign: RaffleCampaign) -> int:
     if slots:
         return max(1, len(slots))
     return max(1, int(campaign.max_winners or 1))
-
 
 
 def _normalize_tickets_by_tariff(raw) -> dict[int, int]:

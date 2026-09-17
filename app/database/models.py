@@ -5310,9 +5310,7 @@ class RaffleWinner(Base):
     """Запись победителя после розыгрыша (начисление может быть ручным)."""
 
     __tablename__ = 'raffle_winners'
-    __table_args__ = (
-        UniqueConstraint('campaign_id', 'user_id', name='uq_raffle_winners_campaign_user'),
-    )
+    __table_args__ = (UniqueConstraint('campaign_id', 'user_id', name='uq_raffle_winners_campaign_user'),)
 
     id = Column(Integer, primary_key=True, index=True)
     campaign_id = Column(Integer, ForeignKey('raffle_campaigns.id', ondelete='CASCADE'), nullable=False, index=True)
