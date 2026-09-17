@@ -49,6 +49,7 @@ class CreateRaffleCampaignRequest(BaseModel):
     prize_type: str = Field(RafflePrizeType.CUSTOM.value)
     prize_value: int | None = None
     prize_text: str | None = None
+    starts_at: datetime | None = None
     ends_at: datetime | None = None
 
 
@@ -126,6 +127,7 @@ async def create_raffle_campaign(
         name=request.name.strip(),
         description=request.description,
         status=RaffleCampaignStatus.DRAFT.value,
+        starts_at=request.starts_at,
         ends_at=request.ends_at,
         max_winners=request.max_winners,
         prize_type=prize_type,
