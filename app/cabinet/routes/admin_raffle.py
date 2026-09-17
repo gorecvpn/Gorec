@@ -9,7 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
 from app.database.crud import raffle as raffle_crud
-from app.database.models import RaffleCampaignStatus, RafflePrizeType, User
+from app.database.models import RaffleCampaignStatus, RafflePrizeType, RaffleWinner, User
 from app.services.raffle.service import draw_winners
 
 from ..dependencies import get_cabinet_db, require_permission
@@ -35,6 +35,8 @@ class AdminRaffleCampaignItem(BaseModel):
     unique_users: int = 0
     winners: int = 0
     created_at: datetime | None = None
+    updated_at: datetime | None = None
+    drawn_at: datetime | None = None
 
 
 class AdminRaffleCampaignListResponse(BaseModel):
@@ -55,22 +57,97 @@ class CreateRaffleCampaignRequest(BaseModel):
 
 class AdminRaffleWinnerItem(BaseModel):
     id: int
+    campaign_id: int
     user_id: int
+    telegram_id: int | None = None
+    username: str | None = None
+    first_name: str | None = None
+    display_name: str | None = None
+    ticket_id: int | None = None
     ticket_code: str | None = None
     place: int
     prize_type: str | None = None
     prize_value: int | None = None
     prize_text: str | None = None
     awarded: bool
+    awarded_at: datetime | None = None
+    created_at: datetime | None = None
 
 
 class AdminRaffleDrawResponse(BaseModel):
     campaign_id: int
     status: str
+    drawn_at: datetime | None = None
     winners: list[AdminRaffleWinnerItem]
 
 
-def _campaign_item(campaign, stats: dict[str, int]) -> AdminRaffleCampaignItem:
+class AdminRaffleCampaignDetailResponse(BaseModel):
+    enabled: bool
+    campaign: AdminRaffleCampaignItem
+    winners: list[AdminRaffleWinnerItem]
+
+
+def _user_display(user: User | None, user_id: int) -> tuple[int | None, str | None, str | None, str]:
+    if user is None:
+        return None, None, None, f'user#{user_id}'
+    telegram_id = getattr(user, 'telegram_id', None)
+    username = getattr(user, 'username', None) or None
+    first_name = getattr(user, 'first_name', None) or None
+    if username:
+        display = f'@{username}'
+    elif first_name:
+        display = first_name
+    elif telegram_id:
+        display = f'tg:{telegram_id}'
+    else:
+        display = f'user#{user_id}'
+    return telegram_id, username, first_name, display
+
+
+def _winner_item(winner: RaffleWinner) -> AdminRaffleWinnerItem:
+    user = getattr(winner, 'user', None)
+    telegram_id, username, first_name, display_name = _user_display(user, winner.user_id)
+    ticket_code = winner.ticket_code
+    if not ticket_code:
+        ticket = getattr(winner, 'ticket', None)
+        if ticket is not None:
+            ticket_code = getattr(ticket, 'ticket_code', None)
+    return AdminRaffleWinnerItem(
+        id=winner.id,
+        campaign_id=winner.campaign_id,
+        user_id=winner.user_id,
+        telegram_id=telegram_id,
+        username=username,
+        first_name=first_name,
+        display_name=display_name,
+        ticket_id=winner.ticket_id,
+        ticket_code=ticket_code,
+        place=winner.place,
+        prize_type=winner.prize_type,
+        prize_value=winner.prize_value,
+        prize_text=winner.prize_text,
+        awarded=bool(winner.awarded),
+        awarded_at=winner.awarded_at,
+        created_at=winner.created_at,
+    )
+
+
+def _campaign_drawn_at(campaign, winners: list[RaffleWinner] | None = None) -> datetime | None:
+    if campaign.status != RaffleCampaignStatus.DRAWN.value:
+        return None
+    if winners:
+        created = [w.created_at for w in winners if getattr(w, 'created_at', None)]
+        if created:
+            return max(created)
+    return getattr(campaign, 'updated_at', None)
+
+
+def _campaign_item(
+    campaign,
+    stats: dict[str, int],
+    *,
+    drawn_at: datetime | None = None,
+) -> AdminRaffleCampaignItem:
     return AdminRaffleCampaignItem(
         id=campaign.id,
         name=campaign.name,
@@ -86,6 +163,8 @@ def _campaign_item(campaign, stats: dict[str, int]) -> AdminRaffleCampaignItem:
         unique_users=stats.get('unique_users', 0),
         winners=stats.get('winners', 0),
         created_at=campaign.created_at,
+        updated_at=getattr(campaign, 'updated_at', None),
+        drawn_at=drawn_at if drawn_at is not None else _campaign_drawn_at(campaign),
     )
 
 
@@ -103,6 +182,27 @@ async def list_raffle_campaigns(
         stats = await raffle_crud.get_campaign_ticket_stats(db, campaign.id)
         items.append(_campaign_item(campaign, stats))
     return AdminRaffleCampaignListResponse(enabled=settings.is_raffle_enabled(), campaigns=items)
+
+
+@router.get('/campaigns/{campaign_id}', response_model=AdminRaffleCampaignDetailResponse)
+async def get_raffle_campaign(
+    campaign_id: int,
+    admin: User = Depends(require_permission('raffle:read')),
+    db: AsyncSession = Depends(get_cabinet_db),
+):
+    """Campaign detail with full draw history (winners)."""
+    campaign = await raffle_crud.get_campaign_by_id(db, campaign_id)
+    if not campaign:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail='Campaign not found')
+
+    stats = await raffle_crud.get_campaign_ticket_stats(db, campaign.id)
+    winners = await raffle_crud.list_winners(db, campaign.id)
+    drawn_at = _campaign_drawn_at(campaign, winners)
+    return AdminRaffleCampaignDetailResponse(
+        enabled=settings.is_raffle_enabled(),
+        campaign=_campaign_item(campaign, stats, drawn_at=drawn_at),
+        winners=[_winner_item(w) for w in winners],
+    )
 
 
 @router.post('/campaigns', response_model=AdminRaffleCampaignItem, status_code=status.HTTP_201_CREATED)
@@ -181,17 +281,19 @@ async def draw_raffle_campaign(
     admin: User = Depends(require_permission('raffle:edit')),
     db: AsyncSession = Depends(get_cabinet_db),
 ):
-    """Run the weighted draw for a campaign."""
+    """Run the weighted draw for a campaign (up to max_winners unique users)."""
     campaign = await raffle_crud.get_campaign_by_id(db, campaign_id)
     if not campaign:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail='Campaign not found')
 
     try:
-        winners = await draw_winners(db, campaign_id)
+        await draw_winners(db, campaign_id)
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
 
     campaign = await raffle_crud.get_campaign_by_id(db, campaign_id)
+    winners = await raffle_crud.list_winners(db, campaign_id)
+    drawn_at = _campaign_drawn_at(campaign, winners) if campaign else None
     logger.info(
         'Admin drew raffle campaign',
         campaign_id=campaign_id,
@@ -201,17 +303,6 @@ async def draw_raffle_campaign(
     return AdminRaffleDrawResponse(
         campaign_id=campaign_id,
         status=campaign.status if campaign else RaffleCampaignStatus.DRAWN.value,
-        winners=[
-            AdminRaffleWinnerItem(
-                id=w.id,
-                user_id=w.user_id,
-                ticket_code=w.ticket_code,
-                place=w.place,
-                prize_type=w.prize_type,
-                prize_value=w.prize_value,
-                prize_text=w.prize_text,
-                awarded=w.awarded,
-            )
-            for w in winners
-        ],
+        drawn_at=drawn_at,
+        winners=[_winner_item(w) for w in winners],
     )
