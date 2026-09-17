@@ -7,6 +7,7 @@ from app.services.raffle.service import (
     retry_award_winner,
 )
 
+
 __all__ = [
     'draw_winners',
     'issue_for_purchase',
