@@ -88,6 +88,7 @@ class NotificationType(Enum):
     PAYMENT_RECEIVED = 'payment_received'
     NALOGO_RECEIPT = 'nalogo_receipt'
     PROMO_OFFER = 'promo_offer'
+    RAFFLE_TICKET = 'raffle_ticket'
 
     # Guest purchase notifications
     GUEST_SUBSCRIPTION_DELIVERED = 'guest_subscription_delivered'

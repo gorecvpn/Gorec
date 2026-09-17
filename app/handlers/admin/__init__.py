@@ -8,6 +8,7 @@ from . import (
     campaigns,
     contests,
     coupons,
+    raffles,
     daily_contests,
     faq,
     main,

@@ -5220,3 +5220,100 @@ class ReachabilityTargetPref(Base):
     note = Column(Text, nullable=True)
     updated_by_user_id = Column(Integer, ForeignKey('users.id', ondelete='SET NULL'), nullable=True)
     updated_at = Column(AwareDateTime(), default=func.now(), onupdate=func.now())
+
+
+# ==================== RAFFLE (purchase tickets) ====================
+
+
+class RaffleCampaignStatus(StrEnum):
+    """Статусы кампании розыгрыша билетов за покупку."""
+
+    DRAFT = 'draft'
+    ACTIVE = 'active'
+    CLOSED = 'closed'
+    DRAWN = 'drawn'
+
+
+class RafflePrizeType(StrEnum):
+    """Типы приза розыгрыша."""
+
+    DAYS = 'days'
+    BALANCE = 'balance'
+    CUSTOM = 'custom'
+
+
+class RaffleCampaign(Base):
+    """Кампания розыгрыша: билеты выдаются за оплаченную подписку."""
+
+    __tablename__ = 'raffle_campaigns'
+
+    id = Column(Integer, primary_key=True, index=True)
+    name = Column(String(255), nullable=False)
+    description = Column(Text, nullable=True)
+    status = Column(String(20), nullable=False, default=RaffleCampaignStatus.DRAFT.value, index=True)
+    starts_at = Column(AwareDateTime(), nullable=False, default=func.now())
+    ends_at = Column(AwareDateTime(), nullable=True)
+    max_winners = Column(Integer, nullable=False, default=1)
+    prize_type = Column(String(20), nullable=False, default=RafflePrizeType.CUSTOM.value)
+    prize_value = Column(Integer, nullable=True)  # дни или копейки
+    prize_text = Column(Text, nullable=True)
+    created_at = Column(AwareDateTime(), default=func.now())
+    updated_at = Column(AwareDateTime(), default=func.now(), onupdate=func.now())
+
+    tickets = relationship('RaffleTicket', back_populates='campaign', cascade='all, delete-orphan')
+    winners = relationship('RaffleWinner', back_populates='campaign', cascade='all, delete-orphan')
+
+    def __repr__(self) -> str:
+        return f'<RaffleCampaign id={self.id} name={self.name!r} status={self.status}>'
+
+
+class RaffleTicket(Base):
+    """Билет розыгрыша, выданный за одну оплаченную транзакцию подписки."""
+
+    __tablename__ = 'raffle_tickets'
+    __table_args__ = (
+        UniqueConstraint('campaign_id', 'source_transaction_id', name='uq_raffle_tickets_campaign_tx'),
+        Index('ix_raffle_tickets_campaign_user', 'campaign_id', 'user_id'),
+    )
+
+    id = Column(Integer, primary_key=True, index=True)
+    campaign_id = Column(Integer, ForeignKey('raffle_campaigns.id', ondelete='CASCADE'), nullable=False, index=True)
+    user_id = Column(Integer, ForeignKey('users.id', ondelete='CASCADE'), nullable=False, index=True)
+    ticket_code = Column(String(64), nullable=False, unique=True, index=True)
+    source_transaction_id = Column(Integer, nullable=False)
+    tariff_id = Column(Integer, ForeignKey('tariffs.id', ondelete='SET NULL'), nullable=True)
+    created_at = Column(AwareDateTime(), default=func.now())
+
+    campaign = relationship('RaffleCampaign', back_populates='tickets')
+    user = relationship('User')
+
+    def __repr__(self) -> str:
+        return f'<RaffleTicket id={self.id} code={self.ticket_code!r} user_id={self.user_id}>'
+
+
+class RaffleWinner(Base):
+    """Запись победителя после розыгрыша (начисление может быть ручным)."""
+
+    __tablename__ = 'raffle_winners'
+    __table_args__ = (
+        UniqueConstraint('campaign_id', 'user_id', name='uq_raffle_winners_campaign_user'),
+    )
+
+    id = Column(Integer, primary_key=True, index=True)
+    campaign_id = Column(Integer, ForeignKey('raffle_campaigns.id', ondelete='CASCADE'), nullable=False, index=True)
+    user_id = Column(Integer, ForeignKey('users.id', ondelete='CASCADE'), nullable=False, index=True)
+    ticket_id = Column(Integer, ForeignKey('raffle_tickets.id', ondelete='SET NULL'), nullable=True)
+    ticket_code = Column(String(64), nullable=True)
+    place = Column(Integer, nullable=False, default=1)
+    prize_type = Column(String(20), nullable=True)
+    prize_value = Column(Integer, nullable=True)
+    prize_text = Column(Text, nullable=True)
+    awarded = Column(Boolean, nullable=False, default=False)
+    awarded_at = Column(AwareDateTime(), nullable=True)
+    created_at = Column(AwareDateTime(), default=func.now())
+
+    campaign = relationship('RaffleCampaign', back_populates='winners')
+    user = relationship('User')
+
+    def __repr__(self) -> str:
+        return f'<RaffleWinner id={self.id} campaign_id={self.campaign_id} user_id={self.user_id} place={self.place}>'

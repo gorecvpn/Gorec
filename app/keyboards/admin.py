@@ -113,6 +113,12 @@ def get_admin_promo_submenu_keyboard(language: str = 'ru') -> InlineKeyboardMark
                     callback_data='admin_contests',
                 )
             ],
+            [
+                InlineKeyboardButton(
+                    text=_t(texts, 'ADMIN_RAFFLES', '🎟 Розыгрыш'),
+                    callback_data='admin_raffles',
+                )
+            ],
             [InlineKeyboardButton(text=texts.ADMIN_PROMO_GROUPS, callback_data='admin_promo_groups')],
             [InlineKeyboardButton(text=texts.BACK, callback_data='admin_panel')],
         ]

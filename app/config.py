@@ -478,6 +478,7 @@ class Settings(BaseSettings):
 
     # Конкурсы (глобальный флаг, будет расширяться под разные типы)
     CONTESTS_ENABLED: bool = False
+    RAFFLE_ENABLED: bool = False  # Розыгрыш билетов за покупку подписки
     CONTESTS_BUTTON_VISIBLE: bool = False
     # Для обратной совместимости со старыми конфигами
     REFERRAL_CONTESTS_ENABLED: bool = False
@@ -3514,6 +3515,9 @@ class Settings(BaseSettings):
         if self.is_happ_cryptolink_mode():
             return False
         return self.HIDE_SUBSCRIPTION_LINK
+
+    def is_raffle_enabled(self) -> bool:
+        return bool(getattr(self, 'RAFFLE_ENABLED', False))
 
     def is_contests_enabled(self) -> bool:
         if getattr(self, 'CONTESTS_ENABLED', False):
