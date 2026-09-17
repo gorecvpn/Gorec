@@ -101,3 +101,21 @@ async def test_draw_already_drawn_returns_existing(monkeypatch):
 
     result = await raffle_service.draw_winners(SimpleNamespace(), 9)
     assert result is existing
+
+
+def test_resolve_prize_for_place_uses_slots():
+    campaign = SimpleNamespace(
+        prize_type='custom',
+        prize_value=None,
+        prize_text='Fallback',
+        prize_slots=[
+            {'place': 1, 'prize_type': 'days', 'prize_value': 90, 'prize_text': None},
+            {'place': 2, 'prize_type': 'balance', 'prize_value': 50000, 'prize_text': None},
+        ],
+        max_winners=2,
+    )
+    first = raffle_service.resolve_prize_for_place(campaign, 1)
+    second = raffle_service.resolve_prize_for_place(campaign, 2)
+    assert first['prize_type'] == 'days' and first['prize_value'] == 90
+    assert second['prize_type'] == 'balance' and second['prize_value'] == 50000
+    assert raffle_service.max_winners_for_campaign(campaign) == 2
