@@ -1063,18 +1063,8 @@ class MenuLayoutService:
         if button_type == 'callback':
             # Кастомная кнопка с callback_data
             return InlineKeyboardButton(text=text, callback_data=action, icon_custom_emoji_id=custom_emoji_id)
-        # Розыгрыш: при наличии MINIAPP_CUSTOM_URL открываем /raffle сразу (WebApp)
+        # Розыгрыш: всегда in-bot callback (не открываем cabinet /raffle WebApp из меню)
         if action == 'menu_raffle' or effective_button_id == 'raffle':
-            from app.utils.miniapp_buttons import build_cabinet_url
-
-            raffle_url = build_cabinet_url('/raffle')
-            if raffle_url:
-                return InlineKeyboardButton(
-                    text=text,
-                    web_app=types.WebAppInfo(url=raffle_url),
-                    icon_custom_emoji_id=custom_emoji_id,
-                )
-            # Иначе оставляем callback — хендлер покажет fallback
             return InlineKeyboardButton(text=text, callback_data='menu_raffle', icon_custom_emoji_id=custom_emoji_id)
         # builtin - проверяем open_mode
         if open_mode == 'direct':

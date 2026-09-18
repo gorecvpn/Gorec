@@ -31,6 +31,7 @@ def test_raffle_builtin_in_classic_defaults() -> None:
     info = next(b for b in BUILTIN_BUTTONS_INFO if b['id'] == 'raffle')
     assert info['callback_data'] == 'menu_raffle'
     assert info['default_conditions'] == {'raffle_visible': True}
+    assert info.get('supports_direct_open') is False
 
 
 def test_raffle_not_confused_with_contests() -> None:
@@ -52,10 +53,12 @@ def test_cabinet_builtins_include_raffle() -> None:
     assert 'raffle' in all_default_btns
 
 
-def test_miniapp_maps_menu_raffle_to_path() -> None:
-    assert CALLBACK_TO_CABINET_PATH['menu_raffle'] == '/raffle'
-    assert CALLBACK_TO_CABINET_STYLE['menu_raffle'] == 'primary'
-    assert CALLBACK_TO_SECTION['menu_raffle'] == 'raffle'
+def test_miniapp_does_not_route_menu_raffle_to_cabinet() -> None:
+    """Main-menu raffle must stay an in-bot callback, not a WebApp deep-link."""
+    assert 'menu_raffle' not in CALLBACK_TO_CABINET_PATH
+    assert 'menu_raffle' not in CALLBACK_TO_CABINET_STYLE
+    # Section style lookup may still exist for admin UI; path routing must not.
+    assert CALLBACK_TO_SECTION.get('menu_raffle') == 'raffle'
 
 
 @pytest.mark.parametrize(
@@ -83,7 +86,7 @@ def test_evaluate_raffle_visible_requires_both_flags(monkeypatch: pytest.MonkeyP
         assert MenuLayoutService._evaluate_conditions({'raffle_visible': True}, ctx) is False
 
 
-def test_build_button_raffle_opens_webapp_when_miniapp_configured() -> None:
+def test_build_button_raffle_always_callback_even_with_miniapp() -> None:
     button_config = {
         'type': 'builtin',
         'builtin_id': 'raffle',
@@ -99,12 +102,11 @@ def test_build_button_raffle_opens_webapp_when_miniapp_configured() -> None:
         button = MenuLayoutService._build_button(button_config, context, texts, button_id='raffle')
 
     assert isinstance(button, InlineKeyboardButton)
-    assert button.web_app is not None
-    assert button.web_app.url == 'https://cab.example/raffle'
-    assert button.callback_data is None
+    assert button.callback_data == 'menu_raffle'
+    assert button.web_app is None
 
 
-def test_build_button_raffle_falls_back_to_callback_without_miniapp() -> None:
+def test_build_button_raffle_callback_without_miniapp() -> None:
     button_config = {
         'type': 'builtin',
         'builtin_id': 'raffle',
@@ -169,8 +171,10 @@ def test_cabinet_keyboard_shows_raffle_when_enabled(monkeypatch: pytest.MonkeyPa
         )
 
         kb = _build_cabinet_main_menu_keyboard('ru', texts, is_admin=False, is_moderator=False)
+        callbacks = [btn.callback_data for row in kb.inline_keyboard for btn in row]
         urls = [btn.web_app.url for row in kb.inline_keyboard for btn in row if btn.web_app is not None]
-        assert any(u.endswith('/raffle') for u in urls)
+        assert 'menu_raffle' in callbacks
+        assert not any(u and u.endswith('/raffle') for u in urls)
 
 
 def test_cabinet_keyboard_hides_raffle_when_feature_off(monkeypatch: pytest.MonkeyPatch) -> None:
