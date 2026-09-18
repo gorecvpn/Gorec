@@ -40,11 +40,8 @@ router = APIRouter(prefix='/admin/raffle', tags=['Cabinet Admin Raffle'])
 _BYTES_PER_MB = 1024 * 1024
 # Prize photos from phone gallery — keep modest for Mini App admin UX.
 _MAX_RAFFLE_IMAGE_BYTES = 5 * _BYTES_PER_MB
-_ALLOWED_SCHEMES = frozenset({'http', 'https'})
-
-
 class RaffleImageUploadResponse(BaseModel):
-    """Public URL for a prize image stored under /uploads."""
+    """Public path/URL for a prize image stored under /uploads."""
 
     url: str
     thumbnail_url: str | None = None
@@ -55,14 +52,16 @@ class RaffleImageUploadResponse(BaseModel):
     height: int | None = None
 
 
-def _build_upload_url(request: Request, relative_path: str) -> str:
-    """Build a full URL for a media file, respecting reverse proxy headers."""
-    proto = request.headers.get('X-Forwarded-Proto', request.url.scheme).split(',')[0].strip()
-    if proto not in _ALLOWED_SCHEMES:
-        proto = 'https'
-    host = request.headers.get('X-Forwarded-Host', request.headers.get('Host', request.url.netloc))
-    host = host.split(',')[0].strip()
-    return f'{proto}://{host}/uploads/{relative_path}'
+def _build_upload_url(_request: Request, relative_path: str) -> str:
+    """Return a site-relative /uploads/... path.
+
+    Absolute cabinet-host URLs break in Gorec Caddy setups: only /api/* is
+    proxied to the bot, so https://cabinet/.../uploads/... hits the SPA and
+    prize cards render blank. Relative paths are resolved by the cabinet via
+    VITE_API_URL (/api/uploads/...) or via a Caddy /uploads handle.
+    """
+    rel = relative_path.lstrip('/')
+    return f'/uploads/{rel}'
 
 
 def _upload_response(request: Request, saved: SavedMedia) -> RaffleImageUploadResponse:
