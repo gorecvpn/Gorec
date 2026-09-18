@@ -236,11 +236,6 @@ docker compose up -d
 
 <div align="center">
 
-**[MIT License]
----
-
-<div align="center">
-
 **[MIT License](LICENSE)** — используйте свободно для личных и коммерческих проектов.
 
 </div>
