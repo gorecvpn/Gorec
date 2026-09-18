@@ -1,16 +1,24 @@
 """Admin raffle campaign management for cabinet."""
 
+import asyncio
 from datetime import datetime
-from typing import Any
+from typing import Any, Literal
 
 import structlog
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, File, HTTPException, Query, Request, UploadFile, status
+from PIL import Image as PILImage
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
 from app.database.crud import raffle as raffle_crud
 from app.database.models import RaffleCampaignStatus, RafflePrizeType, RaffleWinner, User
+from app.services.news_media_service import (
+    SavedMedia,
+    detect_file_type,
+    ensure_upload_dirs,
+    save_image,
+)
 from app.services.raffle.service import (
     DRAW_ALGORITHM,
     _normalize_image_url,
@@ -22,12 +30,113 @@ from app.services.raffle.service import (
     tickets_by_tariff_for_api,
 )
 
-from ..dependencies import get_cabinet_db, require_permission
+from ..dependencies import get_cabinet_db, get_client_ip, get_current_cabinet_user, require_permission
 
 
 logger = structlog.get_logger(__name__)
 
 router = APIRouter(prefix='/admin/raffle', tags=['Cabinet Admin Raffle'])
+
+_BYTES_PER_MB = 1024 * 1024
+# Prize photos from phone gallery — keep modest for Mini App admin UX.
+_MAX_RAFFLE_IMAGE_BYTES = 5 * _BYTES_PER_MB
+_ALLOWED_SCHEMES = frozenset({'http', 'https'})
+
+
+class RaffleImageUploadResponse(BaseModel):
+    """Public URL for a prize image stored under /uploads."""
+
+    url: str
+    thumbnail_url: str | None = None
+    media_type: Literal['image'] = 'image'
+    filename: str
+    size_bytes: int
+    width: int | None = None
+    height: int | None = None
+
+
+def _build_upload_url(request: Request, relative_path: str) -> str:
+    """Build a full URL for a media file, respecting reverse proxy headers."""
+    proto = request.headers.get('X-Forwarded-Proto', request.url.scheme).split(',')[0].strip()
+    if proto not in _ALLOWED_SCHEMES:
+        proto = 'https'
+    host = request.headers.get('X-Forwarded-Host', request.headers.get('Host', request.url.netloc))
+    host = host.split(',')[0].strip()
+    return f'{proto}://{host}/uploads/{relative_path}'
+
+
+def _upload_response(request: Request, saved: SavedMedia) -> RaffleImageUploadResponse:
+    thumbnail_url = (
+        _build_upload_url(request, saved.thumbnail_path) if saved.thumbnail_path else None
+    )
+    return RaffleImageUploadResponse(
+        url=_build_upload_url(request, saved.relative_path),
+        thumbnail_url=thumbnail_url,
+        filename=saved.filename,
+        size_bytes=saved.size_bytes,
+        width=saved.width,
+        height=saved.height,
+    )
+
+
+async def require_raffle_writer(
+    request: Request,
+    user: User = Depends(get_current_cabinet_user),
+    db: AsyncSession = Depends(get_cabinet_db),
+) -> User:
+    """Allow prize image upload for admins who can create or edit raffles."""
+    from app.services.permission_service import PermissionService
+
+    try:
+        client_ip = get_client_ip(request)
+    except HTTPException:
+        client_ip = 'unknown'
+    user_agent = request.headers.get('user-agent', '')
+
+    last_reason = 'missing permission'
+    for perm in ('raffle:create', 'raffle:edit'):
+        allowed, reason = await PermissionService.check_permission(
+            db,
+            user,
+            perm,
+            ip_address=client_ip,
+        )
+        if allowed:
+            await PermissionService.log_action(
+                db,
+                user_id=user.id,
+                action='raffle:upload',
+                resource_type='raffle',
+                status='success',
+                ip_address=client_ip,
+                user_agent=user_agent,
+                request_method=request.method,
+                request_path=str(request.url.path),
+                details={'via': perm},
+            )
+            await db.commit()
+            return user
+        last_reason = reason or last_reason
+
+    await PermissionService.log_action(
+        db,
+        user_id=user.id,
+        action='raffle:upload',
+        resource_type='raffle',
+        status='denied',
+        ip_address=client_ip,
+        user_agent=user_agent,
+        request_method=request.method,
+        request_path=str(request.url.path),
+        details={'reason': last_reason},
+    )
+    await db.commit()
+    raise HTTPException(
+        status_code=status.HTTP_403_FORBIDDEN,
+        detail=f'Permission denied: {last_reason}',
+    )
+
+
 
 
 class PrizeSlotInput(BaseModel):
@@ -520,6 +629,71 @@ async def update_raffle_campaign(
     stats = await raffle_crud.get_campaign_ticket_stats(db, campaign.id)
     logger.info('Admin updated raffle campaign', campaign_id=campaign.id, admin_id=admin.id)
     return _campaign_item(campaign, stats)
+
+
+@router.post(
+    '/upload',
+    response_model=RaffleImageUploadResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+async def upload_raffle_prize_image(
+    request: Request,
+    file: UploadFile = File(...),
+    admin: User = Depends(require_raffle_writer),
+) -> RaffleImageUploadResponse:
+    """Upload a JPEG/PNG/WebP prize photo (max 5 MB) into the public /uploads tree."""
+    absolute_max_bytes = _MAX_RAFFLE_IMAGE_BYTES + 1
+    data = await file.read(absolute_max_bytes)
+    await file.close()
+    if not data:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail='Empty file',
+        )
+    if len(data) >= absolute_max_bytes:
+        raise HTTPException(
+            status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+            detail='File too large. Maximum size: 5 MB',
+        )
+
+    try:
+        media_type, _ext = detect_file_type(data)
+    except ValueError:
+        raise HTTPException(
+            status_code=status.HTTP_415_UNSUPPORTED_MEDIA_TYPE,
+            detail='Unsupported file type. Allowed: JPEG, PNG, WebP',
+        ) from None
+
+    if media_type != 'image':
+        raise HTTPException(
+            status_code=status.HTTP_415_UNSUPPORTED_MEDIA_TYPE,
+            detail='Only images are allowed for raffle prizes',
+        )
+
+    upload_path = settings.get_media_upload_path()
+    await asyncio.to_thread(ensure_upload_dirs, upload_path)
+
+    try:
+        saved = await save_image(
+            data,
+            upload_path,
+            max_dim=settings.MEDIA_IMAGE_MAX_DIMENSION,
+            quality=settings.MEDIA_JPEG_QUALITY,
+        )
+    except (ValueError, OSError, PILImage.DecompressionBombError) as exc:
+        logger.warning('Failed to save raffle prize image', error=str(exc))
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail='Failed to process uploaded file',
+        ) from None
+
+    logger.info(
+        'Raffle prize image uploaded',
+        filename=saved.filename,
+        size_bytes=saved.size_bytes,
+        admin_id=admin.id,
+    )
+    return _upload_response(request, saved)
 
 
 @router.delete('/campaigns/{campaign_id}', status_code=status.HTTP_204_NO_CONTENT)
