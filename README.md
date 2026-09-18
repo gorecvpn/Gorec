@@ -240,6 +240,3 @@ docker compose up -d
 
 </div>
 
----
-
-> Working copy for **gorecvpn/GorecVPN-**, based on [BEDOLAGA-DEV/remnawave-bedolaga-telegram-bot](https://github.com/BEDOLAGA-DEV/remnawave-bedolaga-telegram-bot) (`fafb28c`).
