@@ -42,7 +42,7 @@ CRASH_ERROR_PREVIEW_LENGTH: Final[int] = 200
 
 # URL-ы
 GITHUB_BOT_URL: Final[str] = 'https://github.com/gorecvpn/GorecVPN-'
-GITHUB_CABINET_URL: Final[str] = 'https://github.com/BEDOLAGA-DEV/bedolaga-cabinet'
+GITHUB_CABINET_URL: Final[str] = 'https://github.com/gorecvpn/Gorec-Cabinet'
 COMMUNITY_URL: Final[str] = 'https://t.me/+wTdMtSWq8YdmZmVi'
 DEVELOPER_CONTACT_URL: Final[str] = 'https://t.me/fringg'
 

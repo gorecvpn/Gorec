@@ -109,10 +109,18 @@ def _normalize_tickets_by_tariff(raw) -> dict[int, int]:
             count = int(value)
         except (TypeError, ValueError):
             continue
-        if count < 1 or count > 50:
+        if tid < 1 or count < 1 or count > 50:
             continue
         out[tid] = count
     return out
+
+
+def tickets_by_tariff_for_api(raw) -> dict[str, int] | None:
+    """Cabinet contract: tickets_by_tariff keys are decimal strings."""
+    mapping = _normalize_tickets_by_tariff(raw)
+    if not mapping:
+        return None
+    return {str(k): int(v) for k, v in mapping.items()}
 
 
 def tickets_count_for_purchase(campaign: RaffleCampaign, tariff_id: int | None) -> int:
