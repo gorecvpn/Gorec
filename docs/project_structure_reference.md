@@ -85,7 +85,7 @@
   Функции: `create_bot` — Create a Bot instance with SOCKS5 proxy and/or custom Telegram API server.
 - `app/cabinet/`
 - `app/config.py` — Python-модуль
-  Классы: `Settings` (398 методов)
+  Классы: `Settings` (399 методов)
   Функции: `transliterate_cyrillic` — Заменяет кириллические буквы латинскими, сохраняя регистр («Шмель» → «Shmel»)., `set_period_prices_from_db` — Устанавливает периоды/цены из БД., `get_db_period_prices` — Возвращает периоды/цены из БД если они загружены., `clear_db_period_prices` — Очищает кеш цен из тарифов (при переключении в classic mode)., `refresh_period_prices` — Rebuild cached period price mapping., `refresh_classic_period_prices` — Rebuild CLASSIC_PERIOD_PRICES from current settings., `get_traffic_prices`, `refresh_traffic_prices`
 - `app/database/`
 - `app/external/`
@@ -4388,7 +4388,7 @@
   Функции: `raffle_enabled`, `active_campaign`, `test_issue_for_purchase_disabled_returns_empty`, `test_issue_for_purchase_no_campaign_returns_empty`, `test_issue_for_purchase_idempotent`, `test_issue_for_purchase_creates_once`, `test_issue_skips_trial_when_flag_set`, `test_issue_uses_tickets_by_tariff`, `test_issue_allows_paid_negative_amount_subscription` — Paid SUBSCRIPTION_PAYMENT rows store negative amount_kopeks — must still issue., `test_issue_skips_zero_amount_as_trial`
 - `tests/services/test_raffle_main_menu_button.py` — Python-модуль
   Классы: нет
-  Функции: `test_raffle_builtin_in_classic_defaults`, `test_raffle_not_confused_with_contests`, `test_cabinet_builtins_include_raffle`, `test_miniapp_maps_menu_raffle_to_path`, `test_evaluate_raffle_visible_condition`, `test_build_button_raffle_opens_webapp_when_miniapp_configured`, `test_build_button_raffle_falls_back_to_callback_without_miniapp`, `test_cabinet_keyboard_shows_raffle_when_enabled`, `test_cabinet_keyboard_hides_raffle_when_feature_off`, `test_cabinet_keyboard_respects_section_enabled_false`
+  Функции: `test_raffle_builtin_in_classic_defaults`, `test_raffle_not_confused_with_contests`, `test_cabinet_builtins_include_raffle`, `test_miniapp_maps_menu_raffle_to_path`, `test_evaluate_raffle_visible_condition`, `test_evaluate_raffle_visible_requires_both_flags` — Button stays hidden when feature is on but RAFFLE_BUTTON_VISIBLE is false., `test_build_button_raffle_opens_webapp_when_miniapp_configured`, `test_build_button_raffle_falls_back_to_callback_without_miniapp`, `test_cabinet_keyboard_shows_raffle_when_enabled`, `test_cabinet_keyboard_hides_raffle_when_feature_off`, `test_cabinet_keyboard_respects_section_enabled_false`, `test_cabinet_keyboard_hides_raffle_when_button_flag_off` — RAFFLE_ENABLED=true but RAFFLE_BUTTON_VISIBLE=false → button hidden., `test_is_raffle_button_visible_helper`, `test_sync_main_menu_shows_raffle_only_when_both_flags`
 - `tests/services/test_raffle_prize_image_url.py` — Python-модуль
   Классы: нет
   Функции: `test_normalize_image_url_https_and_path`, `test_normalize_image_url_rejects_http_and_protocol_relative`, `test_normalize_prize_slots_keeps_image_url`

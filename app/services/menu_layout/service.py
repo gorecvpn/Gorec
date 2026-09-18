@@ -760,9 +760,9 @@ class MenuLayoutService:
             if not settings.CONTESTS_BUTTON_VISIBLE:
                 return False
 
-        # raffle_visible — hard gate on RAFFLE_ENABLED (not contests)
+        # raffle_visible — hard gate: RAFFLE_ENABLED + RAFFLE_BUTTON_VISIBLE (not contests)
         if conditions.get('raffle_visible') is True:
-            if not settings.is_raffle_enabled():
+            if not settings.is_raffle_button_visible():
                 return False
 
         # support_enabled

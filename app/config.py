@@ -479,6 +479,7 @@ class Settings(BaseSettings):
     # Конкурсы (глобальный флаг, будет расширяться под разные типы)
     CONTESTS_ENABLED: bool = False
     RAFFLE_ENABLED: bool = False  # Розыгрыш билетов за покупку подписки
+    RAFFLE_BUTTON_VISIBLE: bool = False  # Показ кнопки «Розыгрыш» в главном меню
     CONTESTS_BUTTON_VISIBLE: bool = False
     # Для обратной совместимости со старыми конфигами
     REFERRAL_CONTESTS_ENABLED: bool = False
@@ -3519,6 +3520,9 @@ class Settings(BaseSettings):
 
     def is_raffle_enabled(self) -> bool:
         return bool(getattr(self, 'RAFFLE_ENABLED', False))
+
+    def is_raffle_button_visible(self) -> bool:
+        return self.is_raffle_enabled() and bool(getattr(self, 'RAFFLE_BUTTON_VISIBLE', False))
 
     def is_contests_enabled(self) -> bool:
         if getattr(self, 'CONTESTS_ENABLED', False):
