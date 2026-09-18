@@ -375,7 +375,7 @@ BUILTIN_BUTTONS_INFO: list[dict[str, Any]] = [
         'callback_data': 'menu_raffle',
         'default_conditions': {'raffle_visible': True},
         'supports_dynamic_text': False,
-        'supports_direct_open': True,
+        'supports_direct_open': False,
     },
     {
         'id': 'support',

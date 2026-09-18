@@ -515,7 +515,8 @@ def _build_cabinet_main_menu_keyboard(
                     raffle_text = section_cfg.get('labels', {}).get(language, '') or texts.t(
                         'RAFFLE_BUTTON', '🎫 Розыгрыш'
                     )
-                    row_buttons.append(_cabinet_button(raffle_text, '/raffle', 'menu_raffle'))
+                    # Always in-bot callback — do not open cabinet /raffle WebApp from main menu
+                    row_buttons.append(InlineKeyboardButton(text=raffle_text, callback_data='menu_raffle'))
                     rendered_sections.add('raffle')
 
                 case 'support':
@@ -578,7 +579,7 @@ def _build_cabinet_main_menu_keyboard(
         raffle_cfg = cached_styles.get('raffle', {})
         if raffle_cfg.get('enabled', True):
             raffle_text = raffle_cfg.get('labels', {}).get(language, '') or texts.t('RAFFLE_BUTTON', '🎫 Розыгрыш')
-            keyboard_rows.append([_cabinet_button(raffle_text, '/raffle', 'menu_raffle')])
+            keyboard_rows.append([InlineKeyboardButton(text=raffle_text, callback_data='menu_raffle')])
 
     # -- Moderator panel (only when not admin — admin row handled above) --
     if is_moderator and not is_admin:
@@ -785,15 +786,10 @@ def get_main_menu_keyboard(
         )
 
     # Розыгрыш (не путать с конкурсами): hard gate RAFFLE_ENABLED + RAFFLE_BUTTON_VISIBLE
+    # Always callback — in-bot screen, never cabinet WebApp from main menu
     if settings.is_raffle_button_visible():
-        from app.utils.miniapp_buttons import build_cabinet_url
-
         raffle_label = texts.t('RAFFLE_BUTTON', '🎫 Розыгрыш')
-        raffle_url = build_cabinet_url('/raffle')
-        if raffle_url:
-            paired_buttons.append(InlineKeyboardButton(text=raffle_label, web_app=types.WebAppInfo(url=raffle_url)))
-        else:
-            paired_buttons.append(InlineKeyboardButton(text=raffle_label, callback_data='menu_raffle'))
+        paired_buttons.append(InlineKeyboardButton(text=raffle_label, callback_data='menu_raffle'))
 
     try:
         from app.services.support_settings_service import SupportSettingsService
