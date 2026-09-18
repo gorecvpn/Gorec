@@ -52,6 +52,7 @@ def _cabinet_repo() -> str:
     configured = (getattr(settings, 'CABINET_VERSION_CHECK_REPO', None) or '').strip()
     return configured or DEFAULT_CABINET_REPO
 
+
 _cabinet_cache: dict = {}
 _cabinet_last_check: datetime | None = None
 _CACHE_TTL = 3600
