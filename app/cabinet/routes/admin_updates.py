@@ -7,9 +7,9 @@ import structlog
 from fastapi import APIRouter, Depends
 from pydantic import BaseModel
 
+from app.config import settings
 from app.database.models import User
 from app.services.version_service import version_service
-from app.config import settings
 
 from ..dependencies import require_permission
 
