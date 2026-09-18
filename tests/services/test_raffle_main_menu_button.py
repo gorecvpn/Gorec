@@ -164,12 +164,7 @@ def test_cabinet_keyboard_shows_raffle_when_enabled(monkeypatch: pytest.MonkeyPa
         )
 
         kb = _build_cabinet_main_menu_keyboard('ru', texts, is_admin=False, is_moderator=False)
-        urls = [
-            btn.web_app.url
-            for row in kb.inline_keyboard
-            for btn in row
-            if btn.web_app is not None
-        ]
+        urls = [btn.web_app.url for row in kb.inline_keyboard for btn in row if btn.web_app is not None]
         assert any(u.endswith('/raffle') for u in urls)
 
 
@@ -206,12 +201,7 @@ def test_cabinet_keyboard_hides_raffle_when_feature_off(monkeypatch: pytest.Monk
         monkeypatch.setattr(button_styles_cache, '_cached_styles', {**DEFAULT_BUTTON_STYLES})
 
         kb = _build_cabinet_main_menu_keyboard('ru', texts, is_admin=False, is_moderator=False)
-        urls = [
-            btn.web_app.url
-            for row in kb.inline_keyboard
-            for btn in row
-            if btn.web_app is not None
-        ]
+        urls = [btn.web_app.url for row in kb.inline_keyboard for btn in row if btn.web_app is not None]
         callbacks = [btn.callback_data for row in kb.inline_keyboard for btn in row]
         assert not any(u and u.endswith('/raffle') for u in urls)
         assert 'menu_raffle' not in callbacks
@@ -252,10 +242,5 @@ def test_cabinet_keyboard_respects_section_enabled_false(monkeypatch: pytest.Mon
         monkeypatch.setattr(button_styles_cache, '_cached_styles', styles)
 
         kb = _build_cabinet_main_menu_keyboard('ru', texts, is_admin=False, is_moderator=False)
-        urls = [
-            btn.web_app.url
-            for row in kb.inline_keyboard
-            for btn in row
-            if btn.web_app is not None
-        ]
+        urls = [btn.web_app.url for row in kb.inline_keyboard for btn in row if btn.web_app is not None]
         assert not any(u and u.endswith('/raffle') for u in urls)
