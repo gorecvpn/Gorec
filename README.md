@@ -23,7 +23,7 @@
 
 GorecBot — полнофункциональная платформа для продажи VPN-подписок через Telegram. Бот интегрируется с панелью [Remnawave](https://github.com/remnawave/backend) и берёт на себя весь цикл: от регистрации пользователя до автопродления подписки.
 
-> 🖥 **[GorecBot Cabinet](https://github.com/BEDOLAGA-DEV/bedolaga-cabinet)** — веб-кабинет на React + TypeScript, который существенно расширяет возможности бота: личный кабинет, OAuth-авторизация (Google, Yandex, Discord, VK, Telegram OIDC), лендинги, аналитика продаж, RBAC и подарочные подписки.
+> 🖥 **[GorecBot Cabinet](https://github.com/gorecvpn/Gorec-Cabinet)** — веб-кабинет на React + TypeScript, который существенно расширяет возможности бота: личный кабинет, OAuth-авторизация (Google, Yandex, Discord, VK, Telegram OIDC), лендинги, аналитика продаж, RBAC и подарочные подписки.
 
 <div align="center">
 
@@ -105,7 +105,7 @@ GorecBot — полнофункциональная платформа для п
 
 ## 🎁 Подарочные подписки (Subscription Gifting)
 
-GorecBot поддерживает полный кросс-канальный жизненный цикл покупки, управления и активации подарочных подписок как нативно в Telegram-боте, так и через веб-кабинет [GorecBot Cabinet](https://github.com/BEDOLAGA-DEV/bedolaga-cabinet).
+GorecBot поддерживает полный кросс-канальный жизненный цикл покупки, управления и активации подарочных подписок как нативно в Telegram-боте, так и через веб-кабинет [GorecBot Cabinet](https://github.com/gorecvpn/Gorec-Cabinet).
 
 ### 🔑 Канонический формат кода и идентификация
 
@@ -143,7 +143,7 @@ GorecBot поддерживает полный кросс-канальный ж�
 Бэкенд предоставляет и тестирует полный контракт API для подарочных подписок:
 - **Канонические поля**: `gift_code` (публичный код `GIFT_<59_chars>`), `bot_claim_url` (`https://t.me/<bot>?start=GIFT_<59_chars>`) и `cabinet_claim_url` (`https://<cabinet>/buy/gift/<64_chars>`) возвращаются в ответах `/gift/purchase`, `/gift/purchase/{token}`, `/gift/sent` и `/landing/purchase/{token}`, `/landing/gift/{token}` для всех активных (`PAID` / `PENDING_ACTIVATION`) подарков. Для доставленных подарков (`DELIVERED`) поля действий сбрасываются в `None`, сохраняя историю.
 - **Обратная совместимость**: Устаревшие поля (`purchase_token`, `token`, `claim_url`, `bot_claim_link`) сохраняются без изменений. Эндпоинт активации `/gift/activate` продолжает принимать короткие 8/12-символьные коды, префиксы `GIFT-`, канонические `GIFT_...` коды и URL-ссылки.
-- **Граница внешнего фронтенда**: Этот репозиторий содержит бэкенд и тесты контракта API. Внешний веб-кабинет ([GorecBot Cabinet](https://github.com/BEDOLAGA-DEV/bedolaga-cabinet)) разрабатывается в отдельном репозитории и должен отображать новые канонические поля `gift_code`, `bot_claim_url` и `cabinet_claim_url` для визуального паритета с ботом.
+- **Граница внешнего фронтенда**: Этот репозиторий содержит бэкенд и тесты контракта API. Внешний веб-кабинет ([GorecBot Cabinet](https://github.com/gorecvpn/Gorec-Cabinet)) разрабатывается в отдельном репозитории и должен отображать новые канонические поля `gift_code`, `bot_claim_url` и `cabinet_claim_url` для визуального паритета с ботом.
 
 ---
 
@@ -316,7 +316,7 @@ docker compose up -d
 
 <div align="center">
 
-[![Cabinet](https://img.shields.io/badge/Репозиторий-GorecBot_Cabinet-6366f1?style=for-the-badge&logo=react&logoColor=white)](https://github.com/BEDOLAGA-DEV/bedolaga-cabinet)
+[![Cabinet](https://img.shields.io/badge/Репозиторий-GorecBot_Cabinet-6366f1?style=for-the-badge&logo=react&logoColor=white)](https://github.com/gorecvpn/Gorec-Cabinet)
 
 <br>
 

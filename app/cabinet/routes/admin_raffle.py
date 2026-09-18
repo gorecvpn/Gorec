@@ -19,6 +19,7 @@ from app.services.raffle.service import (
     draw_winners,
     max_winners_for_campaign,
     retry_award_winner,
+    tickets_by_tariff_for_api,
 )
 
 from ..dependencies import get_cabinet_db, require_permission
@@ -230,7 +231,7 @@ def _campaign_item(campaign, stats: dict[str, int]) -> AdminRaffleCampaignItem:
         prize_text=campaign.prize_text,
         prize_slots=_normalize_prize_slots(getattr(campaign, 'prize_slots', None)) or None,
         tickets_per_purchase=int(getattr(campaign, 'tickets_per_purchase', 1) or 1),
-        tickets_by_tariff=getattr(campaign, 'tickets_by_tariff', None),
+        tickets_by_tariff=tickets_by_tariff_for_api(getattr(campaign, 'tickets_by_tariff', None)),
         skip_trial_purchases=bool(getattr(campaign, 'skip_trial_purchases', True)),
         tickets=stats.get('tickets', 0),
         unique_users=stats.get('unique_users', 0),

@@ -11,7 +11,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.config import settings
 from app.database.crud import raffle as raffle_crud
 from app.database.models import User
-from app.services.raffle.service import _normalize_prize_slots, max_winners_for_campaign
+from app.services.raffle.service import (
+    _normalize_prize_slots,
+    max_winners_for_campaign,
+    tickets_by_tariff_for_api,
+)
 
 from ..dependencies import get_cabinet_db, get_current_cabinet_user
 
@@ -84,7 +88,7 @@ async def get_raffle_summary(
             status=campaign.status,
             max_winners=max_winners_for_campaign(campaign),
             tickets_per_purchase=int(getattr(campaign, 'tickets_per_purchase', 1) or 1),
-            tickets_by_tariff=getattr(campaign, 'tickets_by_tariff', None),
+            tickets_by_tariff=tickets_by_tariff_for_api(getattr(campaign, 'tickets_by_tariff', None)),
         ),
         tickets=[
             RaffleTicketItem(
