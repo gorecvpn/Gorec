@@ -11,6 +11,7 @@ from app.handlers import (
     menu,
     polls as user_polls,
     promocode,
+    raffle_menu as user_raffle_menu,
     referral,
     referral_settings,
     server_status,
@@ -242,6 +243,7 @@ async def setup_bot() -> tuple[Bot, Dispatcher]:
     common.register_handlers(dp)
     register_stars_handlers(dp)
     user_contests.register_handlers(dp)
+    user_raffle_menu.register_handlers(dp)
     user_polls.register_handlers(dp)
     simple_subscription.register_simple_subscription_handlers(dp)
     logger.info('⭐ Зарегистрированы обработчики Telegram Stars платежей')

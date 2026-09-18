@@ -461,6 +461,10 @@ async def _try_award_prize(
         base = subscription.end_date or datetime.now(UTC)
         subscription.end_date = base + timedelta(days=int(prize_value))
         subscription.updated_at = datetime.now(UTC)
+        # Условия тарифа на новый срок: база тарифа + активные докупки.
+        from app.database.crud.subscription import reconcile_tariff_traffic_limit
+
+        await reconcile_tariff_traffic_limit(db, subscription)
         try:
             await SubscriptionService().update_remnawave_user(db, subscription)
         except Exception as exc:

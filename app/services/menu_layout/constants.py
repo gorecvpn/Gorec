@@ -65,6 +65,12 @@ DEFAULT_MENU_CONFIG: dict[str, Any] = {
             'max_per_row': 2,
         },
         {
+            'id': 'raffle_row',
+            'buttons': ['raffle'],
+            'conditions': {'raffle_visible': True},
+            'max_per_row': 1,
+        },
+        {
             'id': 'support_info_row',
             'buttons': ['support', 'info'],
             'conditions': None,
@@ -212,6 +218,16 @@ DEFAULT_MENU_CONFIG: dict[str, Any] = {
             'conditions': None,
             'dynamic_text': False,
         },
+        'raffle': {
+            'type': 'builtin',
+            'builtin_id': 'raffle',
+            'text': {'ru': '🎫 Розыгрыш', 'en': '🎫 Raffle'},
+            'action': 'menu_raffle',
+            'enabled': True,
+            'visibility': 'all',
+            'conditions': {'raffle_visible': True},
+            'dynamic_text': False,
+        },
         'support': {
             'type': 'builtin',
             'builtin_id': 'support',
@@ -352,6 +368,14 @@ BUILTIN_BUTTONS_INFO: list[dict[str, Any]] = [
         'callback_data': 'contests_menu',
         'default_conditions': {'contests_visible': True},
         'supports_dynamic_text': False,
+    },
+    {
+        'id': 'raffle',
+        'default_text': {'ru': '🎫 Розыгрыш', 'en': '🎫 Raffle'},
+        'callback_data': 'menu_raffle',
+        'default_conditions': {'raffle_visible': True},
+        'supports_dynamic_text': False,
+        'supports_direct_open': True,
     },
     {
         'id': 'support',

@@ -924,6 +924,9 @@
 - `app/handlers/promocode.py` — Python-модуль
   Классы: нет
   Функции: `show_promocode_menu`, `activate_promocode_for_registration` — Активирует промокод для пользователя., `process_promocode`, `handle_promo_subscription_select` — Handle subscription selection for promocode with days in multi-tariff., `register_handlers`
+- `app/handlers/raffle_menu.py` — Python-модуль
+  Классы: нет
+  Функции: `handle_menu_raffle` — Open raffle miniapp or show a sensible fallback when unavailable., `register_handlers`
 - `app/handlers/referral.py` — Python-модуль
   Классы: нет
   Функции: `show_referral_info`, `show_referral_qr`, `show_detailed_referral_list`, `show_referral_analytics`, `create_invite_message`, `show_withdrawal_info` — Показывает информацию о выводе реферального баланса., `start_withdrawal_request` — Начинает процесс оформления заявки на вывод., `process_withdrawal_amount` — Обрабатывает ввод суммы для вывода., `process_withdrawal_amount_callback` — Обрабатывает выбор суммы для вывода через кнопку., `process_payment_details` — Обрабатывает ввод реквизитов и показывает подтверждение., `confirm_withdrawal_request` — Подтверждает и создаёт заявку на вывод., `cancel_withdrawal_request` — Отменяет процесс создания заявки на вывод., `register_handlers`
@@ -4383,6 +4386,9 @@
 - `tests/services/test_raffle_issue_for_purchase.py` — Python-модуль
   Классы: нет
   Функции: `raffle_enabled`, `active_campaign`, `test_issue_for_purchase_disabled_returns_empty`, `test_issue_for_purchase_no_campaign_returns_empty`, `test_issue_for_purchase_idempotent`, `test_issue_for_purchase_creates_once`, `test_issue_skips_trial_when_flag_set`, `test_issue_uses_tickets_by_tariff`, `test_issue_allows_paid_negative_amount_subscription` — Paid SUBSCRIPTION_PAYMENT rows store negative amount_kopeks — must still issue., `test_issue_skips_zero_amount_as_trial`
+- `tests/services/test_raffle_main_menu_button.py` — Python-модуль
+  Классы: нет
+  Функции: `test_raffle_builtin_in_classic_defaults`, `test_raffle_not_confused_with_contests`, `test_cabinet_builtins_include_raffle`, `test_miniapp_maps_menu_raffle_to_path`, `test_evaluate_raffle_visible_condition`, `test_build_button_raffle_opens_webapp_when_miniapp_configured`, `test_build_button_raffle_falls_back_to_callback_without_miniapp`, `test_cabinet_keyboard_shows_raffle_when_enabled`, `test_cabinet_keyboard_hides_raffle_when_feature_off`, `test_cabinet_keyboard_respects_section_enabled_false`
 - `tests/services/test_raffle_prize_image_url.py` — Python-модуль
   Классы: нет
   Функции: `test_normalize_image_url_https_and_path`, `test_normalize_image_url_rejects_http_and_protocol_relative`, `test_normalize_prize_slots_keeps_image_url`

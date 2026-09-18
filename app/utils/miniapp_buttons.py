@@ -53,6 +53,7 @@ CALLBACK_TO_CABINET_PATH: dict[str, str] = {
     'buy_traffic': '/subscription',
     'menu_referrals': '/referral',
     'menu_referral': '/referral',
+    'menu_raffle': '/raffle',
     'menu_promocode': '/balance',
     'menu_support': '/support',
     'menu_info': '/info',
@@ -85,6 +86,7 @@ CALLBACK_TO_CABINET_STYLE: dict[str, str] = {
     'buy_traffic': 'success',
     'menu_referrals': 'success',
     'menu_referral': 'success',
+    'menu_raffle': 'primary',
     'menu_promocode': 'primary',
     'menu_support': 'primary',
     'menu_info': 'primary',
@@ -110,6 +112,7 @@ CALLBACK_TO_CABINET_STYLE: dict[str, str] = {
 BUTTON_KEY_TO_CABINET_PATH: dict[str, str] = {
     'balance': '/balance/top-up',
     'referrals': '/referral',
+    'raffle': '/raffle',
     'promocode': '/balance',
     'connect': '/subscription',
     'subscription': '/subscription',

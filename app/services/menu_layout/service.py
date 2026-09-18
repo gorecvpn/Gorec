@@ -760,6 +760,11 @@ class MenuLayoutService:
             if not settings.CONTESTS_BUTTON_VISIBLE:
                 return False
 
+        # raffle_visible — hard gate on RAFFLE_ENABLED (not contests)
+        if conditions.get('raffle_visible') is True:
+            if not settings.is_raffle_enabled():
+                return False
+
         # support_enabled
         if conditions.get('support_enabled') is True:
             try:
@@ -1058,6 +1063,19 @@ class MenuLayoutService:
         if button_type == 'callback':
             # Кастомная кнопка с callback_data
             return InlineKeyboardButton(text=text, callback_data=action, icon_custom_emoji_id=custom_emoji_id)
+        # Розыгрыш: при наличии MINIAPP_CUSTOM_URL открываем /raffle сразу (WebApp)
+        if action == 'menu_raffle' or effective_button_id == 'raffle':
+            from app.utils.miniapp_buttons import build_cabinet_url
+
+            raffle_url = build_cabinet_url('/raffle')
+            if raffle_url:
+                return InlineKeyboardButton(
+                    text=text,
+                    web_app=types.WebAppInfo(url=raffle_url),
+                    icon_custom_emoji_id=custom_emoji_id,
+                )
+            # Иначе оставляем callback — хендлер покажет fallback
+            return InlineKeyboardButton(text=text, callback_data='menu_raffle', icon_custom_emoji_id=custom_emoji_id)
         # builtin - проверяем open_mode
         if open_mode == 'direct':
             # Прямое открытие Mini App через WebAppInfo
