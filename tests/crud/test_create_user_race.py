@@ -3,7 +3,7 @@
 доставка апдейта) должен идемпотентно возвращать уже существующего пользователя,
 а не выбрасывать необработанный ``IntegrityError`` по ``ix_users_telegram_id``.
 
-Issue: https://github.com/gorecvpn/GorecVPN-/issues/2991
+Issue: https://github.com/gorecvpn/Gorec/issues/2991
 
 Сценарий из отчёта (14.06.2026):
   - Первый поток выполнил INSERT и закоммитил.

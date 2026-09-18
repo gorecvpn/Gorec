@@ -40,6 +40,8 @@ router = APIRouter(prefix='/admin/raffle', tags=['Cabinet Admin Raffle'])
 _BYTES_PER_MB = 1024 * 1024
 # Prize photos from phone gallery — keep modest for Mini App admin UX.
 _MAX_RAFFLE_IMAGE_BYTES = 5 * _BYTES_PER_MB
+
+
 class RaffleImageUploadResponse(BaseModel):
     """Public path/URL for a prize image stored under /uploads."""
 
@@ -65,9 +67,7 @@ def _build_upload_url(_request: Request, relative_path: str) -> str:
 
 
 def _upload_response(request: Request, saved: SavedMedia) -> RaffleImageUploadResponse:
-    thumbnail_url = (
-        _build_upload_url(request, saved.thumbnail_path) if saved.thumbnail_path else None
-    )
+    thumbnail_url = _build_upload_url(request, saved.thumbnail_path) if saved.thumbnail_path else None
     return RaffleImageUploadResponse(
         url=_build_upload_url(request, saved.relative_path),
         thumbnail_url=thumbnail_url,
@@ -134,8 +134,6 @@ async def require_raffle_writer(
         status_code=status.HTTP_403_FORBIDDEN,
         detail=f'Permission denied: {last_reason}',
     )
-
-
 
 
 class PrizeSlotInput(BaseModel):

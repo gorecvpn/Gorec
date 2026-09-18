@@ -63,7 +63,7 @@ class VersionInfo:
 class VersionService:
     def __init__(self, bot=None):
         self.bot = bot
-        self.repo = getattr(settings, 'VERSION_CHECK_REPO', 'gorecvpn/GorecVPN-')
+        self.repo = getattr(settings, 'VERSION_CHECK_REPO', 'gorecvpn/Gorec')
         self.enabled = getattr(settings, 'VERSION_CHECK_ENABLED', True)
         self.current_version = self._get_current_version()
         self.cache_ttl = 3600

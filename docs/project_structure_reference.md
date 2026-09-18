@@ -15,7 +15,6 @@
 - `.gitignore` — файл
 - `.python-version` — файл
 - `.release-please-manifest.json` — файл
-- `CHANGELOG.md` — файл
 - `CONTRIBUTING.md` — файл
 - `Dockerfile` — файл
 - `LICENSE` — файл
@@ -86,7 +85,7 @@
   Функции: `create_bot` — Create a Bot instance with SOCKS5 proxy and/or custom Telegram API server.
 - `app/cabinet/`
 - `app/config.py` — Python-модуль
-  Классы: `Settings` (397 методов)
+  Классы: `Settings` (398 методов)
   Функции: `transliterate_cyrillic` — Заменяет кириллические буквы латинскими, сохраняя регистр («Шмель» → «Shmel»)., `set_period_prices_from_db` — Устанавливает периоды/цены из БД., `get_db_period_prices` — Возвращает периоды/цены из БД если они загружены., `clear_db_period_prices` — Очищает кеш цен из тарифов (при переключении в classic mode)., `refresh_period_prices` — Rebuild cached period price mapping., `refresh_classic_period_prices` — Rebuild CLASSIC_PERIOD_PRICES from current settings., `get_traffic_prices`, `refresh_traffic_prices`
 - `app/database/`
 - `app/external/`
@@ -261,6 +260,9 @@
 - `app/cabinet/routes/admin_promocodes.py` — Python-модуль
   Классы: `PromoCodeResponse`, `PromoCodeListResponse`, `PromoCodeRecentUse`, `PromoCodeDetailResponse`, `PromoCodeCreateRequest`, `PromoCodeUpdateRequest`, `PromoGroupResponse`, `PromoGroupListResponse`, `PromoGroupCreateRequest`, `PromoGroupUpdateRequest`, `DeactivateDiscountResponse`
   Функции: `list_promocodes` — Get list of all promocodes., `get_promocode` — Get promocode details with usage statistics., `create_promocode_endpoint` — Create a new promocode., `update_promocode_endpoint` — Update an existing promocode., `delete_promocode_endpoint` — Delete a promocode., `admin_deactivate_discount_promocode` — Admin: deactivate a user's active discount (promo code or promo offer)., `list_promo_groups` — Get list of all promo groups., `get_promo_group` — Get promo group details., `create_promo_group_endpoint` — Create a new promo group., `update_promo_group_endpoint` — Update a promo group., `delete_promo_group_endpoint` — Delete a promo group.
+- `app/cabinet/routes/admin_raffle.py` — Python-модуль
+  Классы: `RaffleImageUploadResponse`, `PrizeSlotInput`, `AdminRaffleCampaignItem`, `AdminRaffleCampaignListResponse`, `CreateRaffleCampaignRequest`, `UpdateRaffleCampaignRequest`, `AdminRaffleWinnerItem`, `AdminRaffleDrawResponse`, `AdminRaffleCampaignDetailResponse`
+  Функции: `require_raffle_writer` — Allow prize image upload for admins who can create or edit raffles., `list_raffle_campaigns`, `get_raffle_campaign`, `create_raffle_campaign`, `activate_raffle_campaign`, `close_raffle_campaign`, `draw_raffle_campaign`, `award_raffle_winner` — Retry automatic prize award for a winner with awarded=false., `update_raffle_campaign` — Edit campaign. Active/draft: ends_at and prize places; drawn — forbidden; closed — limited., `upload_raffle_prize_image` — Upload a JPEG/PNG/WebP prize photo (max 5 MB) into the public /uploads tree., `delete_raffle_campaign` — Delete finished/closed/drawn (or draft) campaigns. Active requires force=true.
 - `app/cabinet/routes/admin_reachability.py` — Python-модуль
   Классы: нет
   Функции: `get_status`, `get_units`, `get_hosts`, `get_nodes`, `get_subscription_configs`, `parse_input` — Поле «Конфиг или подписка»: ссылки, URL подписок, base64 → конфиги с готовыми целями., `update_pref`, `preview_job`, `create_job`, `list_jobs`, `get_job`, `cancel_job`, `geo_catalog` — Справочник GEO: округа, регионы, провайдеры; города — по фильтру или поиску., `recheck_geo_city` — Повтор одного проваленного города из отчёта GEO: «тот же IP» или «сменить IP»., `preview_batch`, `create_batch`, `list_batches`, `get_batch`, `cancel_batch`, `get_summary`
@@ -360,6 +362,9 @@
 - `app/cabinet/routes/promocode.py` — Python-модуль
   Классы: `PromocodeActivateRequest`, `PromocodeActivateResponse`, `PromocodeDeactivateResponse`
   Функции: `activate_promocode` — Activate a promo code for the current user., `deactivate_discount_promocode` — Deactivate the currently active discount promo code for the current user.
+- `app/cabinet/routes/raffle.py` — Python-модуль
+  Классы: `RaffleCampaignSummary`, `RaffleTicketItem`, `RaffleSummaryResponse`
+  Функции: `get_raffle_summary` — Get active raffle campaign summary and the current user's tickets.
 - `app/cabinet/routes/referral.py` — Python-модуль
   Классы: нет
   Функции: `get_referral_info` — Get referral program info for current user., `get_referral_list` — Get list of invited users., `get_referral_earnings` — Get referral earnings history., `update_reward_choice` — Сохранить, что получать и куда класть дни., `get_referral_terms` — Get referral program terms.
@@ -609,7 +614,7 @@
   Классы: нет
   Функции: `run_alembic_upgrade` — Run ``alembic upgrade head``, handling fresh and legacy databases., `stamp_alembic_head` — Stamp the DB as being at head without running migrations (for existing DBs).
 - `app/database/models.py` — Python-модуль
-  Классы: `AwareDateTime` (2 методов), `UserStatus`, `SubscriptionStatus`, `TransactionType`, `PromoCodeType`, `PaymentMethod`, `MainMenuButtonActionType`, `MainMenuButtonVisibility`, `WheelPrizeType`, `WheelSpinPaymentType`, `YooKassaPayment` (6 методов), `SavedPaymentMethod` (1 методов), `CryptoBotPayment` (5 методов), `AppleTransaction` (2 методов), `AppleIAPAccount` (1 методов), `AppleNotification` (1 методов), `AppleIAPAbuseEvent` (1 методов), `HeleketPayment` (5 методов), `MulenPayPayment` (2 методов), `Pal24Payment` (3 методов), `WataPayment` (2 методов), `PlategaPayment` (2 методов), `PlategaSubscription` (1 методов), `LavaSubscription` (1 методов), `CloudPaymentsPayment` (5 методов), `FreekassaPayment` (5 методов), `KassaAiPayment` (5 методов), `RioPayPayment` (5 методов), `SeverPayPayment` (5 методов), `PayPearPayment` (5 методов), `RollyPayPayment` (5 методов), `OverpayPayment` (5 методов), `AuraPayPayment` (5 методов), `EtoplatezhiPayment` (5 методов), `AntilopayPayment` (5 методов), `JupiterPayment` (5 методов), `DonutPayment` (5 методов), `LavaPayment` (5 методов), `CisPayPayment` (5 методов), `TabPayPayment` (5 методов), `ParityPayPayment` (5 методов), `PromoGroup` (3 методов), `UserPromoGroup` (1 методов), `Tariff` (21 методов), `PartnerStatus`, `User` (12 методов), `Subscription` (15 методов), `GraceAccessSessionModel`, `TrafficPurchase` (1 методов), `Transaction` (1 методов), `SubscriptionConversion` (2 методов), `PromoCode` (2 методов), `PromoCodeUse`, `CouponStatus`, `CouponBatch` (2 методов), `Coupon` (1 методов), `ReferralRewardType`, `ReferralRewardTrigger`, `ReferralRewardMode`, `ReferralRewardLevel` (1 методов), `ReferralEarning` (1 методов), `WithdrawalRequestStatus`, `WithdrawalRequest` (1 методов), `PartnerApplication`, `ReferralContest` (1 методов), `ReferralContestEvent` (1 методов), `ReferralContestVirtualParticipant` (1 методов), `ContestTemplate`, `ContestRound`, `ContestAttempt`, `Squad` (1 методов), `ServiceRule`, `PrivacyPolicy`, `PublicOffer`, `LegalConsent`, `RecurrentPayments`, `FaqSetting`, `FaqPage`, `SystemSetting`, `EmailTemplate`, `MonitoringLog`, `SentNotification`, `SubscriptionEvent`, `DiscountOffer`, `PromoOfferTemplate`, `SubscriptionTemporaryAccess`, `PromoOfferLog`, `BroadcastHistory`, `Poll`, `PollQuestion`, `PollOption`, `PollResponse`, `PollAnswer`, `ServerSquad` (3 методов), `SubscriptionServer`, `SupportAuditLog`, `UserMessage` (1 методов), `WelcomeText`, `PinnedMessage`, `AdvertisingCampaign` (4 методов), `AdvertisingCampaignRegistration` (1 методов), `TicketStatus`, `Ticket` (8 методов), `TicketMessage` (3 методов), `WebApiToken` (1 методов), `MainMenuButton` (3 методов), `MenuLayoutHistory` (1 методов), `ButtonClickLog` (1 методов), `Webhook` (1 методов), `WebhookDelivery` (1 методов), `CabinetRefreshToken` (4 методов), `WheelConfig` (1 методов), `WheelPrize` (1 методов), `WheelSpin` (3 методов), `TicketNotification` (1 методов), `PaymentMethodConfig` (1 методов), `RequiredChannel` (1 методов), `UserChannelSubscription` (1 методов), `AdminRole` (1 методов), `UserRole` (1 методов), `AccessPolicy` (1 методов), `AdminAuditLog` (1 методов), `LandingPage` (1 методов), `GuestPurchaseStatus`, `GuestPurchase` (1 методов), `NewsArticle` (1 методов), `NewsCategory` (1 методов), `NewsTag` (1 методов), `YandexClientIdMap`, `InfoPage`, `UserDeviceAlias`, `SystemErrorEvent`, `EmailQueueItem`, `ReachabilityBatch`, `ReachabilityJob`, `ReachabilityLeg`, `ReachabilityTargetPref`
+  Классы: `AwareDateTime` (2 методов), `UserStatus`, `SubscriptionStatus`, `TransactionType`, `PromoCodeType`, `PaymentMethod`, `MainMenuButtonActionType`, `MainMenuButtonVisibility`, `WheelPrizeType`, `WheelSpinPaymentType`, `YooKassaPayment` (6 методов), `SavedPaymentMethod` (1 методов), `CryptoBotPayment` (5 методов), `AppleTransaction` (2 методов), `AppleIAPAccount` (1 методов), `AppleNotification` (1 методов), `AppleIAPAbuseEvent` (1 методов), `HeleketPayment` (5 методов), `MulenPayPayment` (2 методов), `Pal24Payment` (3 методов), `WataPayment` (2 методов), `PlategaPayment` (2 методов), `PlategaSubscription` (1 методов), `LavaSubscription` (1 методов), `CloudPaymentsPayment` (5 методов), `FreekassaPayment` (5 методов), `KassaAiPayment` (5 методов), `RioPayPayment` (5 методов), `SeverPayPayment` (5 методов), `PayPearPayment` (5 методов), `RollyPayPayment` (5 методов), `OverpayPayment` (5 методов), `AuraPayPayment` (5 методов), `EtoplatezhiPayment` (5 методов), `AntilopayPayment` (5 методов), `JupiterPayment` (5 методов), `DonutPayment` (5 методов), `LavaPayment` (5 методов), `CisPayPayment` (5 методов), `TabPayPayment` (5 методов), `ParityPayPayment` (5 методов), `PromoGroup` (3 методов), `UserPromoGroup` (1 методов), `Tariff` (21 методов), `PartnerStatus`, `User` (12 методов), `Subscription` (15 методов), `GraceAccessSessionModel`, `TrafficPurchase` (1 методов), `Transaction` (1 методов), `SubscriptionConversion` (2 методов), `PromoCode` (2 методов), `PromoCodeUse`, `CouponStatus`, `CouponBatch` (2 методов), `Coupon` (1 методов), `ReferralRewardType`, `ReferralRewardTrigger`, `ReferralRewardMode`, `ReferralRewardLevel` (1 методов), `ReferralEarning` (1 методов), `WithdrawalRequestStatus`, `WithdrawalRequest` (1 методов), `PartnerApplication`, `ReferralContest` (1 методов), `ReferralContestEvent` (1 методов), `ReferralContestVirtualParticipant` (1 методов), `ContestTemplate`, `ContestRound`, `ContestAttempt`, `Squad` (1 методов), `ServiceRule`, `PrivacyPolicy`, `PublicOffer`, `LegalConsent`, `RecurrentPayments`, `FaqSetting`, `FaqPage`, `SystemSetting`, `EmailTemplate`, `MonitoringLog`, `SentNotification`, `SubscriptionEvent`, `DiscountOffer`, `PromoOfferTemplate`, `SubscriptionTemporaryAccess`, `PromoOfferLog`, `BroadcastHistory`, `Poll`, `PollQuestion`, `PollOption`, `PollResponse`, `PollAnswer`, `ServerSquad` (3 методов), `SubscriptionServer`, `SupportAuditLog`, `UserMessage` (1 методов), `WelcomeText`, `PinnedMessage`, `AdvertisingCampaign` (4 методов), `AdvertisingCampaignRegistration` (1 методов), `TicketStatus`, `Ticket` (8 методов), `TicketMessage` (3 методов), `WebApiToken` (1 методов), `MainMenuButton` (3 методов), `MenuLayoutHistory` (1 методов), `ButtonClickLog` (1 методов), `Webhook` (1 методов), `WebhookDelivery` (1 методов), `CabinetRefreshToken` (4 методов), `WheelConfig` (1 методов), `WheelPrize` (1 методов), `WheelSpin` (3 методов), `TicketNotification` (1 методов), `PaymentMethodConfig` (1 методов), `RequiredChannel` (1 методов), `UserChannelSubscription` (1 методов), `AdminRole` (1 методов), `UserRole` (1 методов), `AccessPolicy` (1 методов), `AdminAuditLog` (1 методов), `LandingPage` (1 методов), `GuestPurchaseStatus`, `GuestPurchase` (1 методов), `NewsArticle` (1 методов), `NewsCategory` (1 методов), `NewsTag` (1 методов), `YandexClientIdMap`, `InfoPage`, `UserDeviceAlias`, `SystemErrorEvent`, `EmailQueueItem`, `ReachabilityBatch`, `ReachabilityJob`, `ReachabilityLeg`, `ReachabilityTargetPref`, `RaffleCampaignStatus`, `RafflePrizeType`, `RaffleCampaign` (1 методов), `RaffleTicket` (1 методов), `RaffleWinner` (1 методов)
   Функции: нет
 
 #### app/database/crud
@@ -737,6 +742,9 @@
 - `app/database/crud/public_offer.py` — Python-модуль
   Классы: нет
   Функции: `get_public_offer`, `upsert_public_offer`, `set_public_offer_enabled`
+- `app/database/crud/raffle.py` — Python-модуль
+  Классы: нет
+  Функции: `create_campaign`, `get_campaign_by_id`, `list_campaigns`, `set_campaign_status`, `get_current_active_campaign` — Активная кампания в окне дат. Если несколько — с самым поздним starts_at., `get_ticket_by_campaign_tx` — Any ticket for this purchase (idempotency check)., `list_tickets_by_campaign_tx`, `create_ticket`, `get_campaign_ticket_stats`, `list_tickets_for_campaign`, `list_winners`, `get_winner_by_id`, `create_winner`, `list_tickets_for_user` — Билеты пользователя, опционально в рамках одной кампании (новые сверху)., `update_campaign` — Patch campaign fields. Ellipsis (...) means leave unchanged for nullable fields., `delete_campaign` — Delete campaign; tickets/winners removed explicitly then campaign (FK CASCADE backup).
 - `app/database/crud/rbac.py` — Python-модуль
   Классы: `AdminRoleCRUD` (7 методов), `UserRoleCRUD` (5 методов), `AccessPolicyCRUD` (6 методов), `AuditLogCRUD` (2 методов)
   Функции: нет
@@ -1025,6 +1033,9 @@
 - `app/handlers/admin/quick_amounts.py` — Python-модуль
   Классы: `QuickAmountsStates`
   Функции: `show_quick_amounts_list`, `view_quick_amounts`, `disable_quick_amounts` — Полностью убирает кнопки быстрых сумм: пользователь вводит сумму вручную., `start_edit_quick_amounts`, `reset_quick_amounts`, `process_quick_amounts`, `register_handlers`
+- `app/handlers/admin/raffles.py` — Python-модуль
+  Классы: нет
+  Функции: `show_raffles_menu`, `start_create_campaign`, `process_campaign_name`, `process_campaign_winners`, `select_prize_type`, `process_prize_value`, `view_campaign`, `activate_campaign`, `close_campaign`, `run_draw`, `register_handlers`
 - `app/handlers/admin/referral_levels.py` — Python-модуль
   Классы: нет
   Функции: `show_reward_levels`, `toggle_reward_scheme` — Переключить схему наград., `add_reward_level`, `import_legacy_settings` — Перенести действующие настройки ``REFERRAL_*`` в уровень 1., `show_reward_level`, `toggle_level_active`, `cycle_level_mode` — Перебрать активные бонусы уровня: деньги → дни → оба., `cycle_level_trigger`, `confirm_delete_level` — Спросить перед удалением., `toggle_threshold_population` — Кого считать при проверке порога: всех приглашённых или только с пополнением., `delete_level`, `choose_level_tariff`, `set_level_tariff`, `start_level_value_edit`, `process_level_value`, `toggle_levels_mode` — Переключить, что означает номер уровня: глубину цепочки или ранг партнёра., `toggle_user_choice` — Разрешить или запретить пользователю выбирать вид награды и подписку для дней., `start_depth_edit` — Правка глубины обхода цепочки., `process_depth_value`, `register_handlers`
@@ -1634,6 +1645,7 @@
 - `app/services/public_offer_service.py` — Python-модуль
   Классы: `PublicOfferService` (10 методов)
   Функции: нет
+- `app/services/raffle/`
 - `app/services/rbac_bootstrap_service.py` — Python-модуль
   Классы: `AdminEnvCheck` (2 методов)
   Функции: `normalize_admin_email` — Канонизация email для сравнения с ADMIN_EMAILS: NFKC + lower + strip., `is_user_admin_by_env` — Проверяет, является ли юзер админом по ENV-конфигу (ADMIN_IDS/ADMIN_EMAILS)., `is_protected_from_blocking` — An account named in ADMIN_IDS/ADMIN_EMAILS must never end up BLOCKED., `bootstrap_superadmins` — Ensure every user from ADMIN_IDS / ADMIN_EMAILS has the Superadmin role., `ensure_superadmin_role_on_login` — Idempotent Superadmin assign for ADMIN_IDS / ADMIN_EMAILS users at login time.
@@ -1974,6 +1986,15 @@
 - `app/services/payment/yookassa.py` — Python-модуль
   Классы: `YooKassaPaymentMixin` (15 методов)
   Функции: нет
+
+#### app/services/raffle
+
+- `app/services/raffle/__init__.py` — Python-модуль
+  Классы: нет
+  Функции: нет
+- `app/services/raffle/service.py` — Python-модуль
+  Классы: `RaffleService` (3 методов)
+  Функции: `resolve_prize_for_place`, `max_winners_for_campaign`, `tickets_by_tariff_for_api` — Cabinet contract: tickets_by_tariff keys are decimal strings., `tickets_count_for_purchase` — Resolve how many tickets one purchase grants (per-tariff map, else default)., `issue_for_purchase` — Выдать N билетов за оплаченную подписку., `draw_winners` — Взвешенный выбор уникальных пользователей по числу билетов; статус → drawn., `retry_award_winner`
 
 #### app/services/reachability
 
@@ -2896,6 +2917,12 @@
 - `migrations/alembic/versions/0124_subscription_panel_identity_backfill.py` — Python-модуль
   Классы: нет
   Функции: `upgrade`, `downgrade`
+- `migrations/alembic/versions/0125_create_raffle_tables.py` — Python-модуль
+  Классы: нет
+  Функции: `upgrade`, `downgrade`
+- `migrations/alembic/versions/0126_raffle_mvp_plus.py` — Python-модуль
+  Классы: нет
+  Функции: `upgrade`, `downgrade`
 
 ## scripts
 
@@ -3301,6 +3328,9 @@
 - `tests/cabinet/test_purchase_tariff_refund_on_failure.py` — Python-модуль
   Классы: нет
   Функции: `test_persistence_wrapped_in_refund_guard` — REGRESSION: both persistence branches (extend + create) must sit inside, `test_refund_helper_uses_fresh_user_and_refund_transaction` — REGRESSION: ``_refund_charge`` must re-fetch the user via, `test_refund_helper_records_failed_refund_when_credit_fails` — REGRESSION: ``add_user_balance`` swallows its own errors and returns False, `test_extend_subscription_post_commit_cleanup_is_best_effort` — REGRESSION: ``extend_subscription`` commits the extension, then runs, `test_charge_precedes_guard_and_delivery_steps_stay_outside` — REGRESSION: the guard must start AFTER the committed charge (so it covers, `test_trial_conversion_stays_enabled_in_extend_branch` — REGRESSION: the ``extend_subscription`` call must NOT pass
+- `tests/cabinet/test_raffle_prize_image_upload.py` — Python-модуль
+  Классы: нет
+  Функции: `test_raffle_image_max_size_is_5mb`, `test_build_upload_url_returns_site_relative_path` — Cabinet Mini App must get /uploads/... (not absolute cabinet-host URL)., `test_upload_response_includes_thumbnail`
 - `tests/cabinet/test_recurrent_flags_in_purchase_options.py` — Python-модуль
   Классы: нет
   Функции: `stub_purchase_service` — Классическая ветка строит ответ сервисом — подменяем его целиком., `test_classic_mode_reports_recurrent_flags`
@@ -4347,6 +4377,18 @@
 - `tests/services/test_quick_amounts_service.py` — Python-модуль
   Классы: нет
   Функции: `test_normalize_none_returns_none`, `test_normalize_sorts_and_dedupes`, `test_normalize_empty_list_means_disabled`, `test_normalize_rejects_non_list`, `test_normalize_rejects_non_int_items`, `test_normalize_rejects_non_positive_items`, `test_normalize_rejects_more_than_ten_items`, `test_normalize_caps_after_dedupe`, `test_effective_returns_defaults_when_not_configured`, `test_effective_filters_by_min_max`, `test_effective_returns_empty_when_all_filtered_out`
+- `tests/services/test_raffle_draw_multi_winners.py` — Python-модуль
+  Классы: нет
+  Функции: `campaign`, `test_draw_winners_unique_up_to_max`, `test_draw_winners_caps_at_unique_users`, `test_draw_already_drawn_returns_existing`, `test_resolve_prize_for_place_uses_slots`
+- `tests/services/test_raffle_issue_for_purchase.py` — Python-модуль
+  Классы: нет
+  Функции: `raffle_enabled`, `active_campaign`, `test_issue_for_purchase_disabled_returns_empty`, `test_issue_for_purchase_no_campaign_returns_empty`, `test_issue_for_purchase_idempotent`, `test_issue_for_purchase_creates_once`, `test_issue_skips_trial_when_flag_set`, `test_issue_uses_tickets_by_tariff`, `test_issue_allows_paid_negative_amount_subscription` — Paid SUBSCRIPTION_PAYMENT rows store negative amount_kopeks — must still issue., `test_issue_skips_zero_amount_as_trial`
+- `tests/services/test_raffle_prize_image_url.py` — Python-модуль
+  Классы: нет
+  Функции: `test_normalize_image_url_https_and_path`, `test_normalize_image_url_rejects_http_and_protocol_relative`, `test_normalize_prize_slots_keeps_image_url`
+- `tests/services/test_raffle_tickets_by_tariff_api.py` — Python-модуль
+  Классы: нет
+  Функции: `test_tickets_by_tariff_for_api_stringifies_keys`, `test_tickets_by_tariff_for_api_empty_and_invalid`
 - `tests/services/test_reachability_registries.py` — Python-модуль
   Классы: нет
   Функции: `test_permission_section_registered`, `test_permission_is_grantable`, `test_wildcard_from_bootstrap_survives_a_role_save`, `test_admin_preset_gets_wildcard`, `test_settings_defaults`, `test_settings_land_in_bschek_category`, `test_category_has_title_and_description`, `test_api_key_is_masked_and_numbers_are_not`, `test_env_example_block_is_commented_out` — Раскомментированный BSCHEK_* в .env затеняет значение, заданное из кабинета.
@@ -4437,6 +4479,9 @@
 - `tests/services/test_stars_payload_amount.py` — Python-модуль
   Классы: нет
   Функции: `test_parser_extracts_amount_kopeks_from_known_payload_shapes`, `test_parser_returns_none_for_unrecognised_shapes`, `test_plausibility_accepts_lossless_round_trip` — At rate=1.0 with integer rubles, payload == reconstructed exactly., `test_plausibility_accepts_sub_ruble_drift` — 50.50 ₽ requested → 50 ⭐ × 1.0 = 50.00 ₽ reconstructed → 50 kopeks drift, well within tolerance., `test_plausibility_accepts_20pct_drift` — A 20% rate change between invoice creation and payment must NOT trip the guard., `test_plausibility_rejects_inflated_payload` — A payload claiming 10× the reconstructed amount is pathological — fall back to stars×rate., `test_plausibility_rejects_zero_or_negative`, `test_plausibility_uses_minimum_100_kopek_floor_for_tiny_amounts` — For tiny amounts (e.g. 50 kopeks reconstructed), 20% would be 10 — too tight., `test_negative_control_old_rate_was_lossy` — Regression cover: the pre-fix flow under rate=1.3 lost 0.50 ₽ on a 150 ₽ top-up., `test_negative_control_at_new_rate_is_lossless_for_integer_rubles` — At rate=1.0 with integer rubles, payload and reconstructed agree exactly.
+- `tests/services/test_startup_cabinet_url.py` — Python-модуль
+  Классы: нет
+  Функции: `test_startup_github_urls_are_gorec`
 - `tests/services/test_startup_logo_prewarm.py` — Python-модуль
   Классы: нет
   Функции: `test_prewarm_caches_file_id_and_deletes_message`, `test_prewarm_skips_when_already_cached`, `test_prewarm_no_target_chat_skips`, `test_prewarm_is_best_effort_on_timeout`
