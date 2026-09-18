@@ -60,23 +60,28 @@ def test_miniapp_maps_menu_raffle_to_path() -> None:
 
 
 @pytest.mark.parametrize(
-    ('enabled', 'expected'),
+    ('button_visible', 'expected'),
     [
         (True, True),
         (False, False),
     ],
 )
-def test_evaluate_raffle_visible_condition(monkeypatch: pytest.MonkeyPatch, enabled: bool, expected: bool) -> None:
-    monkeypatch.setattr(
-        'app.services.menu_layout.service.settings',
-        SimpleNamespace(is_raffle_enabled=lambda: enabled),
-        raising=False,
-    )
-    # Patch the settings object methods used by evaluate — only raffle matters here
+def test_evaluate_raffle_visible_condition(
+    monkeypatch: pytest.MonkeyPatch, button_visible: bool, expected: bool
+) -> None:
+    # raffle_visible hard-gates on is_raffle_button_visible() (= ENABLED and BUTTON_VISIBLE)
     with patch('app.services.menu_layout.service.settings') as mock_settings:
-        mock_settings.is_raffle_enabled.return_value = enabled
+        mock_settings.is_raffle_button_visible.return_value = button_visible
         ctx = MenuContext(language='ru')
         assert MenuLayoutService._evaluate_conditions({'raffle_visible': True}, ctx) is expected
+
+
+def test_evaluate_raffle_visible_requires_both_flags(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Button stays hidden when feature is on but RAFFLE_BUTTON_VISIBLE is false."""
+    with patch('app.services.menu_layout.service.settings') as mock_settings:
+        mock_settings.is_raffle_button_visible.return_value = False
+        ctx = MenuContext(language='ru')
+        assert MenuLayoutService._evaluate_conditions({'raffle_visible': True}, ctx) is False
 
 
 def test_build_button_raffle_opens_webapp_when_miniapp_configured() -> None:
@@ -140,6 +145,7 @@ def test_cabinet_keyboard_shows_raffle_when_enabled(monkeypatch: pytest.MonkeyPa
         patch('app.utils.miniapp_buttons.build_cabinet_url', side_effect=lambda path: f'https://cab.example{path}'),
         patch('app.utils.miniapp_buttons.settings') as mini_settings,
     ):
+        mock_settings.is_raffle_button_visible.return_value = True
         mock_settings.is_raffle_enabled.return_value = True
         mock_settings.is_referral_program_enabled.return_value = True
         mock_settings.is_language_selection_enabled.return_value = False
@@ -184,6 +190,7 @@ def test_cabinet_keyboard_hides_raffle_when_feature_off(monkeypatch: pytest.Monk
         patch('app.keyboards.inline.settings') as mock_settings,
         patch('app.utils.miniapp_buttons.build_cabinet_url', side_effect=lambda path: f'https://cab.example{path}'),
     ):
+        mock_settings.is_raffle_button_visible.return_value = False
         mock_settings.is_raffle_enabled.return_value = False
         mock_settings.is_referral_program_enabled.return_value = False
         mock_settings.is_language_selection_enabled.return_value = False
@@ -225,6 +232,7 @@ def test_cabinet_keyboard_respects_section_enabled_false(monkeypatch: pytest.Mon
         patch('app.keyboards.inline.settings') as mock_settings,
         patch('app.utils.miniapp_buttons.build_cabinet_url', side_effect=lambda path: f'https://cab.example{path}'),
     ):
+        mock_settings.is_raffle_button_visible.return_value = True
         mock_settings.is_raffle_enabled.return_value = True
         mock_settings.is_referral_program_enabled.return_value = False
         mock_settings.is_language_selection_enabled.return_value = False
@@ -244,3 +252,113 @@ def test_cabinet_keyboard_respects_section_enabled_false(monkeypatch: pytest.Mon
         kb = _build_cabinet_main_menu_keyboard('ru', texts, is_admin=False, is_moderator=False)
         urls = [btn.web_app.url for row in kb.inline_keyboard for btn in row if btn.web_app is not None]
         assert not any(u and u.endswith('/raffle') for u in urls)
+
+def test_cabinet_keyboard_hides_raffle_when_button_flag_off(monkeypatch: pytest.MonkeyPatch) -> None:
+    """RAFFLE_ENABLED=true but RAFFLE_BUTTON_VISIBLE=false → button hidden."""
+    from app.keyboards.inline import _build_cabinet_main_menu_keyboard
+
+    texts = MagicMock()
+    texts.t = lambda key, default: default
+    texts.MENU_SUBSCRIPTION = 'Sub'
+    texts.MENU_REFERRALS = 'Ref'
+    texts.MENU_SUPPORT = 'Support'
+    texts.MENU_LANGUAGE = 'Lang'
+    texts.MENU_ADMIN = 'Admin'
+    texts.format_price = lambda x: '0'
+
+    with (
+        patch('app.keyboards.inline.settings') as mock_settings,
+        patch('app.utils.miniapp_buttons.build_cabinet_url', side_effect=lambda path: f'https://cab.example{path}'),
+    ):
+        mock_settings.is_raffle_button_visible.return_value = False
+        mock_settings.is_raffle_enabled.return_value = True
+        mock_settings.is_referral_program_enabled.return_value = False
+        mock_settings.is_language_selection_enabled.return_value = False
+        mock_settings.is_multi_tariff_enabled.return_value = False
+        mock_settings.CABINET_BUTTON_STYLE = ''
+
+        monkeypatch.setattr(
+            menu_layout_cache,
+            '_cached_layout',
+            {
+                'row_1': {'id': 'row_1', 'buttons': ['raffle', 'home'], 'max_per_row': 2},
+                'custom_buttons': {},
+            },
+        )
+        monkeypatch.setattr(button_styles_cache, '_cached_styles', {**DEFAULT_BUTTON_STYLES})
+
+        kb = _build_cabinet_main_menu_keyboard('ru', texts, is_admin=False, is_moderator=False)
+        urls = [btn.web_app.url for row in kb.inline_keyboard for btn in row if btn.web_app is not None]
+        callbacks = [btn.callback_data for row in kb.inline_keyboard for btn in row]
+        assert not any(u and u.endswith('/raffle') for u in urls)
+        assert 'menu_raffle' not in callbacks
+
+
+def test_is_raffle_button_visible_helper() -> None:
+    from app.config import Settings
+
+    s = Settings.model_construct(RAFFLE_ENABLED=True, RAFFLE_BUTTON_VISIBLE=False)
+    assert s.is_raffle_enabled() is True
+    assert s.is_raffle_button_visible() is False
+
+    s2 = Settings.model_construct(RAFFLE_ENABLED=True, RAFFLE_BUTTON_VISIBLE=True)
+    assert s2.is_raffle_button_visible() is True
+
+    s3 = Settings.model_construct(RAFFLE_ENABLED=False, RAFFLE_BUTTON_VISIBLE=True)
+    assert s3.is_raffle_button_visible() is False
+
+
+def test_sync_main_menu_shows_raffle_only_when_both_flags() -> None:
+    from app.keyboards.inline import get_main_menu_keyboard
+
+    texts = MagicMock()
+    texts.t = lambda key, default: default
+    texts.MENU_BUY_SUBSCRIPTION = 'Buy'
+    texts.MENU_MY_SUBSCRIPTION = 'Sub'
+    texts.MENU_BALANCE = 'Bal'
+    texts.MENU_PROMOCODE = 'Promo'
+    texts.MENU_REFERRALS = 'Ref'
+    texts.MENU_SUPPORT = 'Support'
+    texts.MENU_LANGUAGE = 'Lang'
+    texts.MENU_ADMIN = 'Admin'
+    texts.format_price = lambda x: '0'
+
+    def _callbacks(kb):
+        return [btn.callback_data for row in kb.inline_keyboard for btn in row]
+
+    def _urls(kb):
+        return [btn.web_app.url for row in kb.inline_keyboard for btn in row if btn.web_app is not None]
+
+    with (
+        patch('app.keyboards.inline.settings') as mock_settings,
+        patch('app.keyboards.inline.get_texts', return_value=texts),
+        patch('app.utils.miniapp_buttons.build_cabinet_url', return_value=''),
+        patch('app.services.support_settings_service.SupportSettingsService') as mock_support,
+    ):
+        mock_support.is_support_menu_enabled.return_value = False
+        mock_settings.is_cabinet_mode.return_value = False
+        mock_settings.is_referral_program_enabled.return_value = False
+        mock_settings.is_language_selection_enabled.return_value = False
+        mock_settings.is_multi_tariff_enabled.return_value = False
+        mock_settings.DEBUG = False
+        mock_settings.CONTESTS_ENABLED = False
+        mock_settings.CONTESTS_BUTTON_VISIBLE = False
+        mock_settings.ACTIVATE_BUTTON_VISIBLE = False
+        mock_settings.SUPPORT_MENU_ENABLED = False
+        mock_settings.SIMPLE_SUBSCRIPTION_ENABLED = False
+        mock_settings.TRIAL_DURATION_DAYS = 0
+        mock_settings.TRIAL_DISABLED_FOR = 'all'
+        mock_settings.MAIN_MENU_MODE = 'default'
+
+        # enabled but button flag off → hidden
+        mock_settings.is_raffle_button_visible.return_value = False
+        mock_settings.is_raffle_enabled.return_value = True
+        kb_hidden = get_main_menu_keyboard('ru', is_admin=False)
+        assert 'menu_raffle' not in _callbacks(kb_hidden)
+        assert not any(u and '/raffle' in u for u in _urls(kb_hidden))
+
+        # both on → shown
+        mock_settings.is_raffle_button_visible.return_value = True
+        kb_shown = get_main_menu_keyboard('ru', is_admin=False)
+        assert 'menu_raffle' in _callbacks(kb_shown)
+
