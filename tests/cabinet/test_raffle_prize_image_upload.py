@@ -16,7 +16,8 @@ def test_raffle_image_max_size_is_5mb():
     assert _MAX_RAFFLE_IMAGE_BYTES == 5 * 1024 * 1024
 
 
-def test_build_upload_url_respects_forwarded_headers():
+def test_build_upload_url_returns_site_relative_path():
+    """Cabinet Mini App must get /uploads/... (not absolute cabinet-host URL)."""
     request = MagicMock()
     request.url.scheme = 'http'
     request.url.netloc = 'internal:8080'
@@ -24,9 +25,8 @@ def test_build_upload_url_respects_forwarded_headers():
         'X-Forwarded-Proto': 'https',
         'X-Forwarded-Host': 'cabinet.example.com',
     }
-    assert _build_upload_url(request, 'images/abc.jpg') == (
-        'https://cabinet.example.com/uploads/images/abc.jpg'
-    )
+    assert _build_upload_url(request, 'images/abc.jpg') == '/uploads/images/abc.jpg'
+    assert _build_upload_url(request, '/images/abc.jpg') == '/uploads/images/abc.jpg'
 
 
 def test_upload_response_includes_thumbnail():
@@ -45,8 +45,8 @@ def test_upload_response_includes_thumbnail():
         height=600,
     )
     resp = _upload_response(request, saved)
-    assert resp.url == 'https://example.com/uploads/images/abc.jpg'
-    assert resp.thumbnail_url == 'https://example.com/uploads/thumbnails/thumb_abc.jpg'
+    assert resp.url == '/uploads/images/abc.jpg'
+    assert resp.thumbnail_url == '/uploads/thumbnails/thumb_abc.jpg'
     assert resp.filename == 'abc.jpg'
     assert resp.media_type == 'image'
     assert resp.size_bytes == 1234
