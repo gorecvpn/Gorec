@@ -429,6 +429,7 @@ def _build_cabinet_main_menu_keyboard(
     )
 
     keyboard_rows: list[list[InlineKeyboardButton]] = []
+    rendered_sections: set[str] = set()
 
     for row_key in row_keys:
         row_def = layout[row_key]
@@ -506,6 +507,17 @@ def _build_cabinet_main_menu_keyboard(
                     ref_text = section_cfg.get('labels', {}).get(language, '') or texts.MENU_REFERRALS
                     row_buttons.append(_cabinet_button(ref_text, '/referral', 'menu_referrals'))
 
+                case 'raffle':
+                    if not settings.is_raffle_enabled():
+                        continue
+                    if not section_cfg.get('enabled', True):
+                        continue
+                    raffle_text = section_cfg.get('labels', {}).get(language, '') or texts.t(
+                        'RAFFLE_BUTTON', '🎫 Розыгрыш'
+                    )
+                    row_buttons.append(_cabinet_button(raffle_text, '/raffle', 'menu_raffle'))
+                    rendered_sections.add('raffle')
+
                 case 'support':
                     if not _is_support_enabled():
                         continue
@@ -560,6 +572,15 @@ def _build_cabinet_main_menu_keyboard(
         if row_buttons:
             for i in range(0, len(row_buttons), max_per_row):
                 keyboard_rows.append(row_buttons[i : i + max_per_row])
+
+    # -- Auto-append raffle when RAFFLE_ENABLED and not already placed in layout --
+    if settings.is_raffle_enabled() and 'raffle' not in rendered_sections:
+        raffle_cfg = cached_styles.get('raffle', {})
+        if raffle_cfg.get('enabled', True):
+            raffle_text = raffle_cfg.get('labels', {}).get(language, '') or texts.t(
+                'RAFFLE_BUTTON', '🎫 Розыгрыш'
+            )
+            keyboard_rows.append([_cabinet_button(raffle_text, '/raffle', 'menu_raffle')])
 
     # -- Moderator panel (only when not admin — admin row handled above) --
     if is_moderator and not is_admin:
@@ -764,6 +785,21 @@ def get_main_menu_keyboard(
         paired_buttons.append(
             InlineKeyboardButton(text=texts.t('CONTESTS_BUTTON', '🎲 Конкурсы'), callback_data='contests_menu')
         )
+
+    # Розыгрыш (не путать с конкурсами): hard gate RAFFLE_ENABLED
+    if settings.is_raffle_enabled():
+        from app.utils.miniapp_buttons import build_cabinet_url
+
+        raffle_label = texts.t('RAFFLE_BUTTON', '🎫 Розыгрыш')
+        raffle_url = build_cabinet_url('/raffle')
+        if raffle_url:
+            paired_buttons.append(
+                InlineKeyboardButton(text=raffle_label, web_app=types.WebAppInfo(url=raffle_url))
+            )
+        else:
+            paired_buttons.append(
+                InlineKeyboardButton(text=raffle_label, callback_data='menu_raffle')
+            )
 
     try:
         from app.services.support_settings_service import SupportSettingsService

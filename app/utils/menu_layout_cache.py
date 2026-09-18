@@ -22,6 +22,7 @@ BUILTIN_SECTIONS: tuple[str, ...] = (
     'subscription',
     'balance',
     'referral',
+    'raffle',
     'support',
     'info',
     'admin',
@@ -36,9 +37,10 @@ VALID_CUSTOM_BUTTON_STYLES = frozenset({'primary', 'success', 'danger', 'default
 DEFAULT_MENU_LAYOUT: dict[str, object] = {
     'row_1': {'id': 'row_1', 'buttons': ['home'], 'max_per_row': 1},
     'row_2': {'id': 'row_2', 'buttons': ['subscription', 'balance'], 'max_per_row': 2},
-    'row_3': {'id': 'row_3', 'buttons': ['referral', 'support'], 'max_per_row': 2},
-    'row_4': {'id': 'row_4', 'buttons': ['info', 'language'], 'max_per_row': 2},
-    'row_5': {'id': 'row_5', 'buttons': ['admin'], 'max_per_row': 1},
+    'row_3': {'id': 'row_3', 'buttons': ['referral', 'raffle'], 'max_per_row': 2},
+    'row_4': {'id': 'row_4', 'buttons': ['support', 'info'], 'max_per_row': 2},
+    'row_5': {'id': 'row_5', 'buttons': ['language'], 'max_per_row': 2},
+    'row_6': {'id': 'row_6', 'buttons': ['admin'], 'max_per_row': 1},
     'custom_buttons': {},
 }
 
