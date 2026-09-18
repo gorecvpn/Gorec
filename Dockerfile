@@ -62,8 +62,8 @@ LABEL org.opencontainers.image.title="GorecBot" \
       org.opencontainers.image.version="${VERSION}" \
       org.opencontainers.image.created="${BUILD_DATE}" \
       org.opencontainers.image.revision="${VCS_REF}" \
-      org.opencontainers.image.source="https://github.com/gorecvpn/GorecVPN-" \
-      org.opencontainers.image.url="https://github.com/gorecvpn/GorecVPN-" \
+      org.opencontainers.image.source="https://github.com/gorecvpn/Gorec" \
+      org.opencontainers.image.url="https://github.com/gorecvpn/Gorec" \
       org.opencontainers.image.vendor="fr1ngg"
 
 HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \

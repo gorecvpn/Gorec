@@ -1458,7 +1458,7 @@ class Settings(BaseSettings):
     APP_CONFIG_CACHE_TTL: int = 3600
 
     VERSION_CHECK_ENABLED: bool = True
-    VERSION_CHECK_REPO: str = 'gorecvpn/GorecVPN-'
+    VERSION_CHECK_REPO: str = 'gorecvpn/Gorec'
     CABINET_VERSION_CHECK_REPO: str = 'gorecvpn/Gorec-Cabinet'
     VERSION_CHECK_INTERVAL_HOURS: int = 1
 

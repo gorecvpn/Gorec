@@ -148,7 +148,7 @@ jobs:
 
             ```bash
             # Docker Hub
-            docker pull gorecvpn/GorecVPN-:${{ github.ref_name }}
+            docker pull gorecvpn/gorec:${{ github.ref_name }}
 
             # GitHub Container Registry
             docker pull ghcr.io/${{ github.repository }}:${{ github.ref_name }}
