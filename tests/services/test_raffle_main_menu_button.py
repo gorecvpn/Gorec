@@ -253,6 +253,7 @@ def test_cabinet_keyboard_respects_section_enabled_false(monkeypatch: pytest.Mon
         urls = [btn.web_app.url for row in kb.inline_keyboard for btn in row if btn.web_app is not None]
         assert not any(u and u.endswith('/raffle') for u in urls)
 
+
 def test_cabinet_keyboard_hides_raffle_when_button_flag_off(monkeypatch: pytest.MonkeyPatch) -> None:
     """RAFFLE_ENABLED=true but RAFFLE_BUTTON_VISIBLE=false → button hidden."""
     from app.keyboards.inline import _build_cabinet_main_menu_keyboard
@@ -361,4 +362,3 @@ def test_sync_main_menu_shows_raffle_only_when_both_flags() -> None:
         mock_settings.is_raffle_button_visible.return_value = True
         kb_shown = get_main_menu_keyboard('ru', is_admin=False)
         assert 'menu_raffle' in _callbacks(kb_shown)
-
