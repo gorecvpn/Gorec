@@ -1,7 +1,5 @@
 <div align="center">
 
-<img src=".github/assets/logo.png" alt="GorecBot" width="800" />
-
 # GorecBot
 
 **Telegram-бот для автоматизации VPN-бизнеса на базе [Remnawave](https://github.com/remnawave/backend)**
@@ -10,10 +8,8 @@
 
 [![Python 3.13+](https://img.shields.io/badge/Python-3.13+-3776AB?style=for-the-badge&logo=python&logoColor=white)](https://python.org)
 [![PostgreSQL](https://img.shields.io/badge/PostgreSQL-15+-4169E1?style=for-the-badge&logo=postgresql&logoColor=white)](https://postgresql.org)
-[![Docker](https://img.shields.io/badge/Docker-Ready-2496ED?style=for-the-badge&logo=docker&logoColor=white)](https://docs.bedolagam.ru/getting-started/docker-deployment)
+[![Docker](https://img.shields.io/badge/Docker-Ready-2496ED?style=for-the-badge&logo=docker&logoColor=white)](https://www.docker.com/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green?style=for-the-badge)](LICENSE)
-
-[📖 Документация](https://docs.bedolagam.ru) · [🤖 Тестировать бота](https://t.me/zero_ping_vpn_bot?start=Git) · [💬 Чат сообщества](https://t.me/+wTdMtSWq8YdmZmVi)
 
 </div>
 
@@ -162,19 +158,19 @@ GorecBot поддерживает полный кросс-канальный ж�
 | 💳 | **Freekassa** | NSPK СБП, карты | RUB |
 | 💳 | **Kassa AI** | СБП, карты, SberPay | RUB |
 | 💳 | **PayPalych (Pal24)** | Карты, СБП | RUB |
-| 🤝 | **[Platega](https://t.me/ArstanPlatega)** 🔸 | Карты, СБП, крипто | RUB |
+| 🤝 | **[Platega](https://t.me/ArstanPlatega)** | Карты, СБП, крипто | RUB |
 | 💳 | **WATA** | СБП, Карты | RUB |
 | 💳 | **MulenPay** | Карты | RUB |
 | 💳 | **RioPay** | Карты | RUB |
 | 💳 | **SeverPay** | СБП, карты | RUB |
-| 🤝 | **[PayPear](https://t.me/Paymen1_Manager)** 🔸 | Карты, СБП, SberPay, T-Pay | RUB |
-| 🤝 | **[RollyPay](https://rollypay.io/?utm_source=bedolaga&utm_medium=community&utm_campaign=integration)** 🔸 | СБП, карты, крипто | RUB → USDT |
-| 🤝 | **[AuraPay](https://aurapay.tech/)** 🔸 | Карты, СБП | RUB |
-| 🤝 | **[Overpay](https://overpay.pro/)** 🔸 | Карты, СБП | RUB |
+| 🤝 | **[PayPear](https://t.me/Paymen1_Manager)** | Карты, СБП, SberPay, T-Pay | RUB |
+| 🤝 | **[RollyPay](https://rollypay.io/)** | СБП, карты, крипто | RUB → USDT |
+| 🤝 | **[AuraPay](https://aurapay.tech/)** | Карты, СБП | RUB |
+| 🤝 | **[Overpay](https://overpay.pro/)** | Карты, СБП | RUB |
 | 🦌 | **Antilopay** | Карты, СБП, SberPay (RSA подпись) | RUB |
 | 💳 | **Etoplatezhi** | Карты, СБП | RUB |
-| 🪐 | **[Jupiter](https://t.me/k_juppiter)** 🔸 | СБП через QR (FPGate P2P v2.1) | RUB |
-| 🍩 | **[Donut](https://t.me/donut_payment)** 🔸 | Карты, СБП по телефону, СБП QR (P2P) | RUB |
+| 🪐 | **[Jupiter](https://t.me/k_juppiter)** | СБП через QR (FPGate P2P v2.1) | RUB |
+| 🍩 | **[Donut](https://t.me/donut_payment)** | Карты, СБП по телефону, СБП QR (P2P) | RUB |
 | 🌋 | **Lava Business** | Карты, СБП (gate.lava.ru) | RUB |
 | 💳 | **CisPay** | СБП, карты (api.cispay.app) | RUB |
 | 💳 | **TabPay** | СБП, карты с 3-D Secure (tabpay.org) | RUB |
@@ -183,106 +179,6 @@ GorecBot поддерживает полный кросс-канальный ж�
 | 📲 | **Tribute** | Telegram-платежи | RUB |
 
 </div>
-
-> 🔸 — официальный партнёр GorecBot (особые условия по кодовому слову **`bedolaga`**)
->
-> Все провайдеры работают параллельно через единый веб-сервер на порту 8080. Подробная настройка — в [документации](https://docs.bedolagam.ru/bot/payments).
-
-<div align="center">
-<table>
-<tr>
-<td align="center">
-
-<img src=".github/assets/platega-logo.jpg" alt="Platega" width="60" />
-
-**🤝 Официальный партнёр Platega**
-
-GorecBot — официальный партнёр платёжной системы **Platega**.<br>
-Пользователи бота получают **особые условия** при подключении по кодовому слову **`bedolaga`**
-
-📩 По вопросам: [@ArstanPlatega](https://t.me/ArstanPlatega)
-
-</td>
-</tr>
-<tr>
-<td align="center">
-
-**🤝 Официальный партнёр PayPear**
-
-GorecBot — официальный партнёр платёжной системы **[PayPear](https://paypear.ru)**.<br>
-Банковские карты, СБП, SberPay и T-Pay — всё через единый API.<br>
-Подключение по **спец. условиям** через кодовое слово **`БЕДОЛАГА`**
-
-📩 Менеджер: [@Paymen1_Manager](https://t.me/Paymen1_Manager)
-
-</td>
-<td align="center">
-
-**🤝 Официальный партнёр RollyPay**
-
-GorecBot — официальный партнёр платёжного шлюза **[RollyPay](https://rollypay.io/?utm_source=bedolaga&utm_medium=community&utm_campaign=integration)**.<br>
-СБП (от 5%), банковские карты РФ, крипто, вывод в USDT.<br>
-Универсальная форма оплаты, высокая проходимость, стабильная работа в каскаде.<br>
-Подключение по кодовому слову **`БЕДОЛАГА`** — **спец. условия**
-
-📩 Менеджер: [@rollypay_manager](https://t.me/rollypay_manager) | 🌐 [rollypay.io](https://rollypay.io/?utm_source=bedolaga&utm_medium=community&utm_campaign=integration)
-
-</td>
-</tr>
-<tr>
-<td align="center">
-
-**🤝 Официальный партнёр AuraPay**
-
-GorecBot — официальный партнёр платёжной системы **[AuraPay](https://aurapay.tech/)**.<br>
-Банковские карты и СБП через единый API с быстрой интеграцией.<br>
-Подключение по кодовому слову **`БЕДОЛАГА`** — **спец. условия**
-
-📩 Менеджер: [@kickdownm](https://t.me/kickdownm) | 🌐 [aurapay.tech](https://aurapay.tech/)
-
-</td>
-<td align="center">
-
-**🤝 Официальный партнёр Overpay**
-
-GorecBot — официальный партнёр платёжного шлюза **[Overpay](https://overpay.pro/)**.<br>
-Банковские карты и СБП, mTLS-авторизация, HPP-интеграция.<br>
-Подключение по кодовому слову **`БЕДОЛАГА`** — **спец. условия**
-
-📩 Менеджер: [@A_OverPay](https://t.me/A_OverPay) | 🌐 [overpay.pro](https://overpay.pro/)
-
-</td>
-</tr>
-<tr>
-<td align="center">
-
-**🤝 Официальный партнёр Jupiter (FPGate P2P)**
-
-GorecBot — официальный партнёр платёжного шлюза **Jupiter** (FPGate P2P v2.1).<br>
-Эквайринг СБП через QR-код банковского приложения, HMAC-SHA256 подпись.<br>
-Высокая проходимость, callback-driven архитектура, защита от replay-атак.<br>
-Подключение по кодовому слову **`БЕДОЛАГА`** — **спец. условия**
-
-📩 Менеджер: [@k_juppiter](https://t.me/k_juppiter)
-
-</td>
-<td align="center">
-
-**🤝 Официальный партнёр Donut**
-
-GorecBot — официальный партнёр платёжной системы **Donut** (Donut P2P).<br>
-P2P-оплата картой, СБП по номеру телефона и СБП QR — три метода через единый API.<br>
-HMAC-SHA256 подпись, sticky terminal-status guard, защита от amount tampering.<br>
-Подключение по кодовому слову **`БЕДОЛАГА`** — **спец. условия**
-
-📩 Менеджер: [@donut_payment](https://t.me/donut_payment)
-
-</td>
-</tr>
-</table>
-</div>
-
----
 
 ## 🚀 Быстрый старт
 
@@ -293,7 +189,6 @@ cp .env.example .env   # заполните переменные
 docker compose up -d
 ```
 
-📖 Подробнее: **[Развёртывание →](https://docs.bedolagam.ru/getting-started/docker-deployment)** · **[Переменные окружения →](https://docs.bedolagam.ru/getting-started/environment)**
 
 ---
 
@@ -335,41 +230,13 @@ docker compose up -d
 | 🎁 | **Подарки** | Покупка и отправка подписок другим пользователям |
 | 🔍 | **Поиск платежей** | Поиск по инвойсу, клиенту с фильтрами и статистикой |
 
----
 
-## 📚 Документация
-
-| | Раздел | Описание |
-|:---:|:---|:---|
-| 🚀 | [Быстрый старт](https://docs.bedolagam.ru/getting-started/quickstart) | Развёртывание за 5 минут |
-| 💳 | [Настройка платежей](https://docs.bedolagam.ru/bot/payments) | 27 провайдеров, webhook, фискализация, Apple IAP |
-| 📦 | [Подписки и тарифы](https://docs.bedolagam.ru/bot/subscriptions) | Конфигурация планов и трафика |
-| 👥 | [Реферальная программа](https://docs.bedolagam.ru/bot/referral-program) | Партнёрка и вывод средств |
-| 🖥 | [Cabinet](https://docs.bedolagam.ru/cabinet/overview) | Настройка веб-кабинета |
-| 🏷 | [Промо-система](https://docs.bedolagam.ru/bot/promo-system) | Промокоды, предложения, скидки |
-| 🔌 | [API Reference](https://docs.bedolagam.ru/api-reference/overview) | REST API для внешних интеграций |
-
-<div align="center">
-
-**📖 Полная документация: [docs.bedolagam.ru](https://docs.bedolagam.ru)**
-
-</div>
 
 ---
 
-## 💬 Сообщество
-
 <div align="center">
 
-[![Telegram Chat](https://img.shields.io/badge/Telegram-Чат_сообщества-26A5E4?style=for-the-badge&logo=telegram&logoColor=white)](https://t.me/+wTdMtSWq8YdmZmVi)
-[![GitHub Issues](https://img.shields.io/badge/GitHub-Issues-181717?style=for-the-badge&logo=github&logoColor=white)](https://github.com/gorecvpn/GorecVPN-/issues)
-
-</div>
-
-- 🐛 **Баги и предложения** — [GitHub Issues](https://github.com/gorecvpn/GorecVPN-/issues)
-- 💬 **Вопросы и обсуждения** — [Telegram-чат](https://t.me/+wTdMtSWq8YdmZmVi)
-- 🤖 **Тестирование** — [@zero_ping_vpn_bot](https://t.me/zero_ping_vpn_bot?start=Git)
-
+**[MIT License]
 ---
 
 <div align="center">
