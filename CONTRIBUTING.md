@@ -99,8 +99,8 @@
 
 1. **Форкните и клонируйте репозиторий:**
 ```bash
-git clone https://github.com/Fr1ngg/GorecVPN-.git
-cd GorecVPN-
+git clone https://github.com/gorecvpn/Gorec.git
+cd Gorec
 ```
 
 2. **Поставьте зависимости:**

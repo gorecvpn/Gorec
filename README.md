@@ -183,8 +183,8 @@ GorecBot поддерживает полный кросс-канальный ж�
 ## 🚀 Быстрый старт
 
 ```bash
-git clone https://github.com/gorecvpn/GorecVPN-.git
-cd GorecVPN-
+git clone https://github.com/gorecvpn/Gorec.git
+cd Gorec
 cp .env.example .env   # заполните переменные
 docker compose up -d
 ```

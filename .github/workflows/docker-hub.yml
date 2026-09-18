@@ -35,19 +35,19 @@ jobs:
 
         if [[ $GITHUB_REF == refs/tags/* ]]; then
           VERSION=${GITHUB_REF#refs/tags/}
-          TAGS="gorecvpn/GorecVPN-:latest,gorecvpn/GorecVPN-:${VERSION}"
+          TAGS="gorecvpn/gorec:latest,gorecvpn/gorec:${VERSION}"
           echo "🏷️ Собираем релизную версию: $VERSION"
         elif [[ $GITHUB_REF == refs/heads/main ]]; then
           VERSION="v${BASE_VERSION}-${SHORT_SHA}"
-          TAGS="gorecvpn/GorecVPN-:latest,gorecvpn/GorecVPN-:${VERSION}"
+          TAGS="gorecvpn/gorec:latest,gorecvpn/gorec:${VERSION}"
           echo "🚀 Собираем версию из main: $VERSION"
         elif [[ $GITHUB_REF == refs/heads/dev ]]; then
           VERSION="v${BASE_VERSION}-dev-${SHORT_SHA}"
-          TAGS="gorecvpn/GorecVPN-:dev,gorecvpn/GorecVPN-:${VERSION}"
+          TAGS="gorecvpn/gorec:dev,gorecvpn/gorec:${VERSION}"
           echo "🧪 Собираем dev версию: $VERSION"
         else
           VERSION="v${BASE_VERSION}-pr-${SHORT_SHA}"
-          TAGS="gorecvpn/GorecVPN-:pr-${SHORT_SHA}"
+          TAGS="gorecvpn/gorec:pr-${SHORT_SHA}"
           echo "🔀 Собираем PR версию: $VERSION"
         fi
 
@@ -110,4 +110,4 @@ jobs:
         echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
         echo "" >> $GITHUB_STEP_SUMMARY
         echo "### 🔗 Ссылки:" >> $GITHUB_STEP_SUMMARY
-        echo "- [Docker Hub Repository](https://hub.docker.com/r/gorecvpn/GorecVPN-)" >> $GITHUB_STEP_SUMMARY
+        echo "- [Docker Hub Repository](https://hub.docker.com/r/gorecvpn/gorec)" >> $GITHUB_STEP_SUMMARY
