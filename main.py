@@ -21,7 +21,6 @@ from app.services.backup_service import backup_service
 from app.services.ban_notification_service import ban_notification_service
 from app.services.broadcast_service import broadcast_service
 from app.services.contest_rotation_service import contest_rotation_service
-from app.services.raffle_scheduler_service import raffle_scheduler_service
 from app.services.daily_subscription_service import daily_subscription_service
 from app.services.grace_access_runtime import grace_access_runtime
 from app.services.log_rotation_service import log_rotation_service
@@ -36,6 +35,7 @@ from app.services.payment_verification_service import (
     get_enabled_auto_methods,
     method_display_name,
 )
+from app.services.raffle_scheduler_service import raffle_scheduler_service
 from app.services.reachability.service import reachability_service
 from app.services.referral_contest_service import referral_contest_service
 from app.services.remnawave_sync_service import remnawave_sync_service

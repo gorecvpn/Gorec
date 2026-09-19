@@ -15,8 +15,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
 from app.database.crud import raffle as raffle_crud
-from app.database.models import RaffleCampaignStatus, RafflePrizeType, RaffleTicketSource, RaffleWinner, User
 from app.database.crud.user import get_user_by_id, get_user_by_telegram_id
+from app.database.models import RaffleCampaignStatus, RafflePrizeType, RaffleTicketSource, RaffleWinner, User
 from app.services.news_media_service import (
     SavedMedia,
     detect_file_type,
