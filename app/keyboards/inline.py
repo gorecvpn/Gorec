@@ -580,9 +580,7 @@ def _build_cabinet_main_menu_keyboard(
     if settings.is_raffle_button_visible() and 'raffle' not in rendered_sections:
         raffle_cfg = cached_styles.get('raffle', {})
         if raffle_cfg.get('enabled', True):
-            raffle_text = raffle_cfg.get('labels', {}).get(language, '') or texts.t(
-                'RAFFLE_BUTTON', '🎁 Розыгрыш'
-            )
+            raffle_text = raffle_cfg.get('labels', {}).get(language, '') or texts.t('RAFFLE_BUTTON', '🎁 Розыгрыш')
             keyboard_rows.append([InlineKeyboardButton(text=raffle_text, callback_data='menu_raffle')])
 
     # -- Moderator panel (only when not admin — admin row handled above) --
