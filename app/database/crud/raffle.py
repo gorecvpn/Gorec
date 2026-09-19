@@ -326,9 +326,7 @@ async def count_tickets_for_user(db: AsyncSession, campaign_id: int, user_id: in
     return int(result.scalar() or 0)
 
 
-async def count_tickets_for_user_by_source(
-    db: AsyncSession, campaign_id: int, user_id: int, source: str
-) -> int:
+async def count_tickets_for_user_by_source(db: AsyncSession, campaign_id: int, user_id: int, source: str) -> int:
     result = await db.execute(
         select(func.count(RaffleTicket.id)).where(
             RaffleTicket.campaign_id == campaign_id,
@@ -377,9 +375,7 @@ async def list_campaigns_needing_reminder(
 
 
 async def list_distinct_ticket_user_ids(db: AsyncSession, campaign_id: int) -> list[int]:
-    result = await db.execute(
-        select(RaffleTicket.user_id).where(RaffleTicket.campaign_id == campaign_id).distinct()
-    )
+    result = await db.execute(select(RaffleTicket.user_id).where(RaffleTicket.campaign_id == campaign_id).distinct())
     return [int(r) for r in result.scalars().all()]
 
 
@@ -387,11 +383,13 @@ async def has_reminder_been_sent(
     db: AsyncSession, campaign_id: int, user_id: int, reminder_type: str = 'ends_24h'
 ) -> bool:
     result = await db.execute(
-        select(RaffleReminderLog.id).where(
+        select(RaffleReminderLog.id)
+        .where(
             RaffleReminderLog.campaign_id == campaign_id,
             RaffleReminderLog.user_id == user_id,
             RaffleReminderLog.reminder_type == reminder_type,
-        ).limit(1)
+        )
+        .limit(1)
     )
     return result.scalar_one_or_none() is not None
 

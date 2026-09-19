@@ -179,7 +179,7 @@ async def test_looks_like_refund_helpers():
     )
     assert not raffle_service._looks_like_refund_or_chargeback(
         SimpleNamespace(
-            description="Покупка тарифа",
+            description='Покупка тарифа',
             external_id='',
             payment_method='balance',
             type='subscription_payment',
@@ -248,7 +248,9 @@ async def test_referral_topup_awards_referrer(monkeypatch):
     monkeypatch.setattr(raffle_service.raffle_crud, 'create_ticket', AsyncMock(side_effect=_create))
     monkeypatch.setattr(raffle_service, '_notify_user_ticket', AsyncMock())
 
-    result = await raffle_service.issue_for_referral_topup(_stub_db(), referrer_id=10, referee_id=20, topup_amount_kopeks=15000)
+    result = await raffle_service.issue_for_referral_topup(
+        _stub_db(), referrer_id=10, referee_id=20, topup_amount_kopeks=15000
+    )
     assert len(result) == 1
     assert created[0].user_id == 10
     assert created[0].source == RaffleTicketSource.REFERRAL

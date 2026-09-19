@@ -327,8 +327,6 @@ async def run_draw(callback: types.CallbackQuery, db_user: User, db: AsyncSessio
     await view_campaign(callback, db_user, db)
 
 
-
-
 @admin_required
 @error_handler
 async def start_grant_tickets(callback: types.CallbackQuery, db_user: User, state: FSMContext):

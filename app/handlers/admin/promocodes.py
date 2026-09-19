@@ -508,9 +508,7 @@ async def process_promocode_code(message: types.Message, db_user: User, state: F
         await message.answer(f'💸 <b>Промокод:</b> <code>{code}</code>\n\nВведите процент скидки (1-100):')
         await state.set_state(AdminStates.setting_promocode_value)
     elif promo_type == 'raffle':
-        await message.answer(
-            f'🎟 <b>Промокод:</b> <code>{code}</code>\n\nВведите число билетов розыгрыша (1-50):'
-        )
+        await message.answer(f'🎟 <b>Промокод:</b> <code>{code}</code>\n\nВведите число билетов розыгрыша (1-50):')
         await state.set_state(AdminStates.setting_promocode_value)
     elif promo_type == 'group':
         # Show promo group selection

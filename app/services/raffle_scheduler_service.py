@@ -27,9 +27,7 @@ class RaffleSchedulerService:
         if not settings.is_raffle_enabled():
             logger.info('Сервис розыгрыша отключён (RAFFLE_ENABLED=false)')
             return
-        if not (
-            settings.is_raffle_auto_draw_enabled() or settings.is_raffle_reminder_enabled()
-        ):
+        if not (settings.is_raffle_auto_draw_enabled() or settings.is_raffle_reminder_enabled()):
             logger.info('Авто-draw и напоминания розыгрыша выключены')
             return
 

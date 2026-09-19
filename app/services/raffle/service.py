@@ -510,9 +510,7 @@ async def send_ending_reminders(db: AsyncSession) -> int:
 
                 bot = create_bot()
                 try:
-                    notif_type = getattr(
-                        NotificationType, 'RAFFLE_REMINDER', NotificationType.RAFFLE_TICKET
-                    )
+                    notif_type = getattr(NotificationType, 'RAFFLE_REMINDER', NotificationType.RAFFLE_TICKET)
                     await notification_delivery_service.send_notification(
                         user=user,
                         notification_type=notif_type,

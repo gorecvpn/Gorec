@@ -86,7 +86,6 @@ def _format_how_to_earn(campaign: RaffleCampaign, texts) -> str:
     return '\n'.join(lines)
 
 
-
 def _format_progress_block(campaign: RaffleCampaign, tickets: list, texts) -> str:
     """Tickets count + days left (no pool size)."""
     count = len(tickets)
@@ -105,9 +104,7 @@ def _format_progress_block(campaign: RaffleCampaign, tickets: list, texts) -> st
             days = max(0, delta.days)
             hours = max(0, delta.seconds // 3600)
             if days > 0:
-                lines.append(
-                    texts.t('RAFFLE_PROGRESS_DAYS_LEFT', 'До окончания: <b>{days}</b> дн.').format(days=days)
-                )
+                lines.append(texts.t('RAFFLE_PROGRESS_DAYS_LEFT', 'До окончания: <b>{days}</b> дн.').format(days=days))
             else:
                 lines.append(
                     texts.t('RAFFLE_PROGRESS_HOURS_LEFT', 'До окончания: <b>{hours}</b> ч.').format(hours=hours)
