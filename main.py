@@ -21,6 +21,7 @@ from app.services.backup_service import backup_service
 from app.services.ban_notification_service import ban_notification_service
 from app.services.broadcast_service import broadcast_service
 from app.services.contest_rotation_service import contest_rotation_service
+from app.services.raffle_scheduler_service import raffle_scheduler_service
 from app.services.daily_subscription_service import daily_subscription_service
 from app.services.grace_access_runtime import grace_access_runtime
 from app.services.log_rotation_service import log_rotation_service
@@ -439,6 +440,21 @@ async def main():
             except Exception as e:
                 stage.warning(f'Ошибка запуска ротации игр: {e}')
                 logger.error('❌ Ошибка запуска ротации игр', error=e)
+
+        async with timeline.stage(
+            'Розыгрыш билетов',
+            '🎟',
+            success_message='Планировщик розыгрыша готов',
+        ) as stage:
+            try:
+                await raffle_scheduler_service.start()
+                if raffle_scheduler_service.is_running():
+                    stage.log('Авто-draw / напоминания розыгрыша запущены')
+                else:
+                    stage.skip('Планировщик розыгрыша выключен настройками')
+            except Exception as e:
+                stage.warning(f'Ошибка запуска планировщика розыгрыша: {e}')
+                logger.error('❌ Ошибка запуска планировщика розыгрыша', error=e)
 
         if settings.is_log_rotation_enabled():
             async with timeline.stage(
@@ -992,6 +1008,12 @@ async def main():
             await contest_rotation_service.stop()
         except Exception as e:
             logger.error('Ошибка остановки ротации игр', error=e)
+
+        logger.info('ℹ️ Остановка планировщика розыгрыша...')
+        try:
+            await raffle_scheduler_service.stop()
+        except Exception as e:
+            logger.error('Ошибка остановки планировщика розыгрыша', error=e)
 
         if settings.is_log_rotation_enabled():
             logger.info('ℹ️ Остановка сервиса ротации логов...')
