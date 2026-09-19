@@ -20,7 +20,7 @@ def test_raffle_builtin_in_classic_defaults() -> None:
     assert 'raffle' in DEFAULT_MENU_CONFIG['buttons']
     raffle_btn = DEFAULT_MENU_CONFIG['buttons']['raffle']
     assert raffle_btn['action'] == 'menu_raffle'
-    assert raffle_btn['text']['ru'] == '🎫 Розыгрыш'
+    assert raffle_btn['text']['ru'] == '🎁 Розыгрыш'
     assert raffle_btn['conditions'] == {'raffle_visible': True}
 
     row_ids = [row['id'] for row in DEFAULT_MENU_CONFIG['rows']]
@@ -90,7 +90,7 @@ def test_build_button_raffle_always_callback_even_with_miniapp() -> None:
     button_config = {
         'type': 'builtin',
         'builtin_id': 'raffle',
-        'text': {'ru': '🎫 Розыгрыш'},
+        'text': {'ru': '🎁 Розыгрыш'},
         'action': 'menu_raffle',
         'enabled': True,
     }
@@ -110,7 +110,7 @@ def test_build_button_raffle_callback_without_miniapp() -> None:
     button_config = {
         'type': 'builtin',
         'builtin_id': 'raffle',
-        'text': {'ru': '🎫 Розыгрыш'},
+        'text': {'ru': '🎁 Розыгрыш'},
         'action': 'menu_raffle',
         'enabled': True,
     }

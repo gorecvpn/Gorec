@@ -513,6 +513,7 @@ def _build_cabinet_main_menu_keyboard(
                         continue
                     if not section_cfg.get('enabled', True):
                         continue
+                    # Same as support/referral: custom label if set, else locale (🎁).
                     raffle_text = section_cfg.get('labels', {}).get(language, '') or texts.t(
                         'RAFFLE_BUTTON', '🎁 Розыгрыш'
                     )

@@ -63,6 +63,23 @@ VALID_STYLES = frozenset({'primary', 'success', 'danger'})
 # All style values accepted by the admin API ('default' = no color, Telegram default).
 ALLOWED_STYLE_VALUES = VALID_STYLES | {'default'}
 
+_STALE_RAFFLE_LABELS = frozenset(
+    {
+        '🎫 Розыгрыш',
+        '🎫 Raffle',
+    }
+)
+
+
+def _scrub_raffle_labels(labels: dict[str, str]) -> dict[str, str]:
+    """Drop legacy ticket-emoji raffle labels; empty labels → locale like other buttons."""
+    return {
+        locale: value
+        for locale, value in labels.items()
+        if (value or '').strip() and (value or '').strip() not in _STALE_RAFFLE_LABELS
+    }
+
+
 # ---- Module-level cache ---------------------------------------------------
 
 _cached_styles: dict[str, dict] | None = None
@@ -118,6 +135,9 @@ async def load_button_styles_cache() -> dict[str, dict]:
                             }
     except Exception:
         logger.exception('Failed to load button styles from DB, using defaults')
+
+    if 'raffle' in merged:
+        merged['raffle']['labels'] = _scrub_raffle_labels(merged['raffle'].get('labels') or {})
 
     _cached_styles = merged
     logger.info('Button styles cache loaded', list=list(merged.keys()))
