@@ -914,3 +914,23 @@ async def export_raffle_winners_csv(
             ]
         )
     return _csv_stream(rows, f'raffle_{campaign_id}_winners.csv')
+
+
+@router.get('/campaigns/{campaign_id}/tickets.csv')
+async def export_raffle_tickets_csv_alias(
+    campaign_id: int,
+    admin: User = Depends(require_permission('raffle:view')),
+    db: AsyncSession = Depends(get_cabinet_db),
+):
+    """Cabinet-expected path (alias of /export/tickets.csv)."""
+    return await export_raffle_tickets_csv(campaign_id, admin, db)
+
+
+@router.get('/campaigns/{campaign_id}/winners.csv')
+async def export_raffle_winners_csv_alias(
+    campaign_id: int,
+    admin: User = Depends(require_permission('raffle:view')),
+    db: AsyncSession = Depends(get_cabinet_db),
+):
+    """Cabinet-expected path (alias of /export/winners.csv)."""
+    return await export_raffle_winners_csv(campaign_id, admin, db)
