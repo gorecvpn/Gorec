@@ -28,7 +28,9 @@ def upgrade() -> None:
     op.create_table(
         'raffle_reminder_logs',
         sa.Column('id', sa.Integer(), primary_key=True, autoincrement=True),
-        sa.Column('campaign_id', sa.Integer(), sa.ForeignKey('raffle_campaigns.id', ondelete='CASCADE'), nullable=False),
+        sa.Column(
+            'campaign_id', sa.Integer(), sa.ForeignKey('raffle_campaigns.id', ondelete='CASCADE'), nullable=False
+        ),
         sa.Column('user_id', sa.Integer(), sa.ForeignKey('users.id', ondelete='CASCADE'), nullable=False),
         sa.Column('reminder_type', sa.String(length=32), nullable=False, server_default='ends_24h'),
         sa.Column('sent_at', sa.DateTime(timezone=True), server_default=sa.text('CURRENT_TIMESTAMP'), nullable=False),
