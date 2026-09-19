@@ -514,7 +514,7 @@ def _build_cabinet_main_menu_keyboard(
                     if not section_cfg.get('enabled', True):
                         continue
                     raffle_text = section_cfg.get('labels', {}).get(language, '') or texts.t(
-                        'RAFFLE_BUTTON', '🎫 Розыгрыш'
+                        'RAFFLE_BUTTON', '🎁 Розыгрыш'
                     )
                     # Always in-bot callback — do not open cabinet /raffle WebApp from main menu
                     row_buttons.append(InlineKeyboardButton(text=raffle_text, callback_data='menu_raffle'))
@@ -579,7 +579,7 @@ def _build_cabinet_main_menu_keyboard(
     if settings.is_raffle_button_visible() and 'raffle' not in rendered_sections:
         raffle_cfg = cached_styles.get('raffle', {})
         if raffle_cfg.get('enabled', True):
-            raffle_text = raffle_cfg.get('labels', {}).get(language, '') or texts.t('RAFFLE_BUTTON', '🎫 Розыгрыш')
+            raffle_text = raffle_cfg.get('labels', {}).get(language, '') or texts.t('RAFFLE_BUTTON', '🎁 Розыгрыш')
             keyboard_rows.append([InlineKeyboardButton(text=raffle_text, callback_data='menu_raffle')])
 
     # -- Moderator panel (only when not admin — admin row handled above) --
@@ -789,7 +789,7 @@ def get_main_menu_keyboard(
     # Розыгрыш (не путать с конкурсами): hard gate RAFFLE_ENABLED + RAFFLE_BUTTON_VISIBLE
     # Always callback — in-bot screen, never cabinet WebApp from main menu
     if settings.is_raffle_button_visible():
-        raffle_label = texts.t('RAFFLE_BUTTON', '🎫 Розыгрыш')
+        raffle_label = texts.t('RAFFLE_BUTTON', '🎁 Розыгрыш')
         paired_buttons.append(InlineKeyboardButton(text=raffle_label, callback_data='menu_raffle'))
 
     try:
