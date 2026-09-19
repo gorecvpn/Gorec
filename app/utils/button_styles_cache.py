@@ -63,16 +63,16 @@ VALID_STYLES = frozenset({'primary', 'success', 'danger'})
 # All style values accepted by the admin API ('default' = no color, Telegram default).
 ALLOWED_STYLE_VALUES = VALID_STYLES | {'default'}
 
-_STALE_RAFFLE_LABELS = frozenset({
-    '🎫 Розыгрыш',
-    '🎫 Raffle',
-    '🎁 Розыгрыш',
-    '🎁 Raffle',
-})
+_STALE_RAFFLE_LABELS = frozenset(
+    {
+        '🎫 Розыгрыш',
+        '🎫 Raffle',
+    }
+)
 
 
 def _scrub_raffle_labels(labels: dict[str, str]) -> dict[str, str]:
-    """Drop legacy hardcoded raffle labels; emoji comes from locale like other buttons."""
+    """Drop legacy ticket-emoji raffle labels; empty labels → locale like other buttons."""
     return {
         locale: value
         for locale, value in labels.items()
