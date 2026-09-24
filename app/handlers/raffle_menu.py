@@ -71,12 +71,20 @@ def _format_prizes_block(campaign: RaffleCampaign, texts) -> str:
 
 def _format_how_to_earn(campaign: RaffleCampaign, texts) -> str:
     default_n = max(1, int(getattr(campaign, 'tickets_per_purchase', 1) or 1))
-    lines = [
-        texts.t('RAFFLE_HOW_HEADER', '🎟 <b>Как получить билеты</b>'),
-        texts.t(
+    if getattr(campaign, 'tickets_per_month', False):
+        purchase_line = texts.t(
+            'RAFFLE_HOW_PURCHASE_PER_MONTH',
+            'За каждый месяц оплаченной подписки — <b>{n}</b> билет(ов): 1 мес. → {n}, 3 мес. → {n3}, '
+            '6 мес. → {n6}, 12 мес. → {n12}.',
+        ).format(n=default_n, n3=default_n * 3, n6=default_n * 6, n12=default_n * 12)
+    else:
+        purchase_line = texts.t(
             'RAFFLE_HOW_PURCHASE',
             'За покупку подписки — <b>{n}</b> билет(ов).',
-        ).format(n=default_n),
+        ).format(n=default_n)
+    lines = [
+        texts.t('RAFFLE_HOW_HEADER', '🎟 <b>Как получить билеты</b>'),
+        purchase_line,
     ]
     by_tariff = tickets_by_tariff_for_api(getattr(campaign, 'tickets_by_tariff', None))
     if by_tariff:
