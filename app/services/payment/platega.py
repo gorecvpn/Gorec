@@ -571,6 +571,7 @@ class PlategaPaymentMixin:
                 payment_method=PaymentMethod.PLATEGA,
                 external_id=charge_id,
                 description='СБП-автопродление Platega',
+                period_days=record.charge_days,
             )
 
             if was_cancelled:
