@@ -2300,6 +2300,7 @@
   "RAFFLE_PRIZE_MULTI": "• {desc} (برندگان: {n})",
   "RAFFLE_HOW_HEADER": "🎟 <b>چگونه بلیت بگیرید</b>",
   "RAFFLE_HOW_PURCHASE": "با خرید اشتراک — <b>{n}</b> بلیت.",
+  "RAFFLE_HOW_PURCHASE_PER_MONTH": "به ازای هر ماه اشتراک پرداخت‌شده — <b>{n}</b> بلیت: ۱ ماه ← {n}، ۳ ماه ← {n3}، ۶ ماه ← {n6}، ۱۲ ماه ← {n12}.",
   "RAFFLE_HOW_TARIFF_NOTE": "برای برخی تعرفه‌ها تعداد بلیت ممکن است متفاوت باشد.",
   "RAFFLE_HOW_SKIP_TRIAL": "خریدهای آزمایشی / رایگان بلیت نمی‌دهند.",
   "RAFFLE_PROGRESS_HEADER": "📊 <b>پیشرفت شما</b>",
