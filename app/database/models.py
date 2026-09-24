@@ -5265,6 +5265,9 @@ class RaffleCampaign(Base):
     # {"tariff_id": tickets_count} — overrides tickets_per_purchase when mapped
     tickets_by_tariff = Column(JSON, nullable=True)
     skip_trial_purchases = Column(Boolean, nullable=False, default=True)
+    # True: tickets_per_purchase / tickets_by_tariff are tickets per month of the
+    # purchased period (× round(period_days / 30), min 1). False: flat per purchase.
+    tickets_per_month = Column(Boolean, nullable=False, default=True, server_default='true')
     draw_seed = Column(String(64), nullable=True)
     draw_algorithm = Column(String(64), nullable=True)
     drawn_at = Column(AwareDateTime(), nullable=True)
