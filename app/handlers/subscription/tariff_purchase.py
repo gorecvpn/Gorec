@@ -3971,6 +3971,7 @@ async def confirm_tariff_switch(
             type=TransactionType.SUBSCRIPTION_PAYMENT,
             amount_kopeks=final_price,
             description=f'Смена тарифа на {tariff.name}',
+            period_days=days_for_new_tariff,
         )
 
         # Отправляем уведомление админу
