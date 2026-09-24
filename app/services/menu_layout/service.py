@@ -1041,6 +1041,18 @@ class MenuLayoutService:
         if not text:
             return None
 
+        # Старые сохранённые раскладки могли хранить «🎫 Розыгрыш» — берём актуальный текст из локали.
+        if effective_button_id == 'raffle' and text.lstrip().startswith('🎫'):
+            text = texts.t('RAFFLE_BUTTON', '🎁 Розыгрыш')
+            if icon == '🎫':
+                icon = ''
+
+        # Старые сохранённые раскладки могли хранить «🎫 Розыгрыш» — берём актуальный текст из локали.
+        if effective_button_id == 'raffle' and text.lstrip().startswith('🎫'):
+            text = texts.t('RAFFLE_BUTTON', '🎁 Розыгрыш')
+            if icon == '🎫':
+                icon = ''
+
         # Добавляем юникод-иконку если есть и текст не начинается с неё.
         # Если параллельно задан icon_custom_emoji_id — Telegram сам рендерит кастом emoji
         # слева, и юникод-icon вызвал бы дубль (две иконки), поэтому пропускаем.
