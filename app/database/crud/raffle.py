@@ -39,6 +39,7 @@ async def create_campaign(
     tickets_per_purchase: int = 1,
     tickets_by_tariff: dict | None = None,
     skip_trial_purchases: bool = True,
+    tickets_per_month: bool = True,
 ) -> RaffleCampaign:
     slots = prize_slots or None
     winners = max(1, int(max_winners or 1))
@@ -59,6 +60,7 @@ async def create_campaign(
         tickets_per_purchase=max(1, min(50, int(tickets_per_purchase or 1))),
         tickets_by_tariff=tickets_by_tariff or None,
         skip_trial_purchases=bool(skip_trial_purchases),
+        tickets_per_month=bool(tickets_per_month),
     )
     db.add(campaign)
     await db.commit()
@@ -270,6 +272,7 @@ async def update_campaign(
     tickets_per_purchase: int | None = None,
     tickets_by_tariff: Any = ...,
     skip_trial_purchases: bool | None = None,
+    tickets_per_month: bool | None = None,
 ) -> RaffleCampaign:
     """Patch campaign fields. Ellipsis (...) means leave unchanged for nullable fields."""
     if name is not None:
@@ -299,6 +302,8 @@ async def update_campaign(
         campaign.tickets_by_tariff = tickets_by_tariff or None
     if skip_trial_purchases is not None:
         campaign.skip_trial_purchases = bool(skip_trial_purchases)
+    if tickets_per_month is not None:
+        campaign.tickets_per_month = bool(tickets_per_month)
     campaign.updated_at = datetime.now(UTC)
     await db.commit()
     await db.refresh(campaign)

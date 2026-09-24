@@ -1115,6 +1115,7 @@ class LavaPaymentMixin:
                 payment_method=PaymentMethod.LAVA,
                 external_id=charge_id,
                 description='Автопродление Lava',
+                period_days=record.charge_days,
             )
 
             await self._notify_lava_recurring(db, record, 'confirmed')

@@ -39,6 +39,7 @@ class RaffleCampaignSummary(BaseModel):
     max_winners: int
     tickets_per_purchase: int = 1
     tickets_by_tariff: dict[str, int] | None = None
+    tickets_per_month: bool = False
 
 
 class RaffleTicketItem(BaseModel):
@@ -89,6 +90,7 @@ async def get_raffle_summary(
             max_winners=max_winners_for_campaign(campaign),
             tickets_per_purchase=int(getattr(campaign, 'tickets_per_purchase', 1) or 1),
             tickets_by_tariff=tickets_by_tariff_for_api(getattr(campaign, 'tickets_by_tariff', None)),
+            tickets_per_month=bool(getattr(campaign, 'tickets_per_month', False)),
         ),
         tickets=[
             RaffleTicketItem(

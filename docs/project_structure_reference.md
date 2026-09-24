@@ -2004,7 +2004,7 @@
   Функции: нет
 - `app/services/raffle/service.py` — Python-модуль
   Классы: `RaffleService` (7 методов)
-  Функции: `resolve_prize_for_place`, `max_winners_for_campaign`, `tickets_by_tariff_for_api` — Cabinet contract: tickets_by_tariff keys are decimal strings., `tickets_count_for_purchase` — Resolve how many tickets one purchase grants (per-tariff map, else default)., `issue_for_purchase` — Выдать N билетов за оплаченную подписку., `grant_tickets` — Админ / промо: выдать N билетов на активную (или указанную) кампанию., `issue_for_referral_topup` — Award ticket(s) to referrer when referred user successfully tops up., `auto_draw_due_campaigns` — Draw ACTIVE campaigns whose ends_at has passed. Returns drawn campaign ids., `send_ending_reminders` — Notify users with tickets ~N hours before ends_at (deduped)., `draw_winners` — Взвешенный выбор уникальных пользователей по числу билетов; статус → drawn., `retry_award_winner`
+  Функции: `resolve_prize_for_place`, `max_winners_for_campaign`, `tickets_by_tariff_for_api` — Cabinet contract: tickets_by_tariff keys are decimal strings., `tickets_count_for_purchase` — Resolve how many tickets one purchase grants (per-tariff map, else default)., `months_in_period` — Months in a purchased period: round(days / 30), minimum 1 (30→1, 90→3, 180→6, 365→12)., `period_days_from_description` — Best-effort purchased period (days) from a SUBSCRIPTION_PAYMENT description., `tickets_for_period` — Tickets for one purchase and the months they were counted for., `issue_for_purchase` — Выдать N билетов за оплаченную подписку., `grant_tickets` — Админ / промо: выдать N билетов на активную (или указанную) кампанию., `issue_for_referral_topup` — Award ticket(s) to referrer when referred user successfully tops up., `auto_draw_due_campaigns` — Draw ACTIVE campaigns whose ends_at has passed. Returns drawn campaign ids., `send_ending_reminders` — Notify users with tickets ~N hours before ends_at (deduped)., `ticket_grant_headline` — «Вы получили 6 билетов за подписку на 6 месяцев»., `draw_winners` — Взвешенный выбор уникальных пользователей по числу билетов; статус → drawn., `retry_award_winner`
 
 #### app/services/reachability
 
@@ -2940,6 +2940,9 @@
   Классы: нет
   Функции: `upgrade`, `downgrade`
 - `migrations/alembic/versions/0128_raffle_enhancement_pack.py` — Python-модуль
+  Классы: нет
+  Функции: `upgrade`, `downgrade`
+- `migrations/alembic/versions/0129_raffle_tickets_per_month.py` — Python-модуль
   Классы: нет
   Функции: `upgrade`, `downgrade`
 
@@ -4451,6 +4454,9 @@
 - `tests/services/test_raffle_tickets_by_tariff_api.py` — Python-модуль
   Классы: нет
   Функции: `test_tickets_by_tariff_for_api_stringifies_keys`, `test_tickets_by_tariff_for_api_empty_and_invalid`
+- `tests/services/test_raffle_tickets_per_month.py` — Python-модуль
+  Классы: нет
+  Функции: `test_months_in_period`, `test_period_days_from_description`, `test_tickets_for_period_default`, `test_tickets_for_period_per_tariff_is_per_month`, `test_tickets_for_period_toggle_off_keeps_flat_count`, `test_tickets_for_period_hard_ceiling`, `test_ticket_grant_headline_plurals`, `test_issue_for_purchase_grants_months_from_description`, `test_issue_for_purchase_explicit_period_days_wins`, `test_issue_for_purchase_addon_gets_base_count`, `test_issue_for_purchase_respects_caps`, `test_issue_for_purchase_toggle_off_is_flat`
 - `tests/services/test_reachability_registries.py` — Python-модуль
   Классы: нет
   Функции: `test_permission_section_registered`, `test_permission_is_grantable`, `test_wildcard_from_bootstrap_survives_a_role_save`, `test_admin_preset_gets_wildcard`, `test_settings_defaults`, `test_settings_land_in_bschek_category`, `test_category_has_title_and_description`, `test_api_key_is_masked_and_numbers_are_not`, `test_env_example_block_is_commented_out` — Раскомментированный BSCHEK_* в .env затеняет значение, заданное из кабинета.

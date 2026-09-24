@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import html
 import random
+import re
 import secrets
 from collections import defaultdict
 from datetime import UTC, datetime, timedelta
@@ -133,6 +134,68 @@ def tickets_count_for_purchase(campaign: RaffleCampaign, tariff_id: int | None) 
     return default
 
 
+DAYS_PER_MONTH = 30
+# Hard ceiling for one purchase batch: 12 months x max 50 tickets per month.
+MAX_TICKETS_PER_PURCHASE_BATCH = 600
+
+_PERIOD_DAYS_RE = re.compile(r'(\d{1,4})\s*(?:дн(?:ей|я|\.)?|день|days?\b)', re.IGNORECASE)
+# Add-ons / prorations: their "за N дн." is the remaining term, not a purchased period.
+_NON_PERIOD_MARKERS = (
+    'трафик',
+    'traffic',
+    'устройств',
+    'device',
+    'стран',
+    'countr',
+    'доплата',
+    'сброс',
+)
+
+
+def months_in_period(period_days: int | None) -> int:
+    """Months in a purchased period: round(days / 30), minimum 1 (30→1, 90→3, 180→6, 365→12)."""
+    try:
+        days = int(period_days or 0)
+    except (TypeError, ValueError):
+        days = 0
+    if days <= 0:
+        return 1
+    # Half-up rounding (Python round() is banker's rounding: 45 days would give 2, 75 → 2).
+    return max(1, int(days / DAYS_PER_MONTH + 0.5))
+
+
+def period_days_from_description(description: str | None) -> int | None:
+    """Best-effort purchased period (days) from a SUBSCRIPTION_PAYMENT description.
+
+    Returns None for add-ons / prorations (traffic, devices, countries, surcharges)
+    and when no "N дней / N дн. / N days" fragment is present.
+    """
+    text = (description or '').strip().lower()
+    if not text:
+        return None
+    if any(marker in text for marker in _NON_PERIOD_MARKERS):
+        return None
+    matches = _PERIOD_DAYS_RE.findall(text)
+    if not matches:
+        return None
+    days = int(matches[-1])
+    return days if days > 0 else None
+
+
+def tickets_for_period(campaign: RaffleCampaign, tariff_id: int | None, period_days: int | None) -> tuple[int, int]:
+    """Tickets for one purchase and the months they were counted for.
+
+    With ``tickets_per_month`` ON the per-tariff / default count is tickets *per month*
+    and is multiplied by months_in_period(period_days). OFF keeps the legacy flat count.
+    Returns (tickets, months); months is 0 when the per-month rule is not applied.
+    """
+    base = tickets_count_for_purchase(campaign, tariff_id)
+    if not bool(getattr(campaign, 'tickets_per_month', False)):
+        return base, 0
+    months = months_in_period(period_days)
+    return min(MAX_TICKETS_PER_PURCHASE_BATCH, base * months), months
+
+
 def _looks_like_trial_purchase(tx: Transaction | None) -> bool:
     if tx is None:
         return False
@@ -209,6 +272,7 @@ async def _issue_ticket_batch(
     source: str,
     source_ref: str | None = None,
     tariff_id: int | None = None,
+    months: int = 0,
 ) -> list[RaffleTicket]:
     """Create up to ``count`` tickets for one source batch; notify once."""
     if count < 1:
@@ -263,7 +327,7 @@ async def _issue_ticket_batch(
         source=source,
         source_transaction_id=source_transaction_id,
     )
-    await _notify_user_ticket(db, user_id, issued[0], campaign, tickets_count=len(issued))
+    await _notify_user_ticket(db, user_id, issued[0], campaign, tickets_count=len(issued), months=months)
     return issued
 
 
@@ -272,10 +336,13 @@ async def issue_for_purchase(
     user_id: int,
     transaction_id: int,
     tariff_id: int | None = None,
+    period_days: int | None = None,
 ) -> list[RaffleTicket]:
     """Выдать N билетов за оплаченную подписку.
 
-    N = tickets_by_tariff[tariff_id] если задано, иначе tickets_per_purchase.
+    base = tickets_by_tariff[tariff_id] если задано, иначе tickets_per_purchase.
+    Если у кампании tickets_per_month=True: N = base × round(period_days / 30) (мин. 1),
+    period_days — явный аргумент или разбор описания транзакции; иначе N = base.
     Идемпотентно по (campaign_id, source_transaction_id) — retries return existing rows.
     Пустой список — если RAFFLE_ENABLED=false / нет кампании / trial/refund skip / caps.
     """
@@ -309,7 +376,10 @@ async def issue_for_purchase(
         except Exception:
             resolved_tariff_id = None
 
-    desired = tickets_count_for_purchase(campaign, resolved_tariff_id)
+    resolved_period_days = period_days
+    if resolved_period_days is None:
+        resolved_period_days = period_days_from_description(getattr(tx, 'description', None))
+    desired, months = tickets_for_period(campaign, resolved_tariff_id, resolved_period_days)
     user_have = await raffle_crud.count_tickets_for_user(db, campaign.id, user_id)
     count = _apply_ticket_caps(
         desired,
@@ -335,6 +405,7 @@ async def issue_for_purchase(
         source=RaffleTicketSource.PURCHASE,
         source_ref=str(transaction_id),
         tariff_id=resolved_tariff_id,
+        months=months,
     )
 
 
@@ -536,6 +607,22 @@ async def send_ending_reminders(db: AsyncSession) -> int:
     return sent
 
 
+def _ru_plural(n: int, one: str, few: str, many: str) -> str:
+    n = abs(int(n))
+    if n % 10 == 1 and n % 100 != 11:
+        return one
+    if 2 <= n % 10 <= 4 and not 12 <= n % 100 <= 14:
+        return few
+    return many
+
+
+def ticket_grant_headline(tickets_count: int, months: int) -> str:
+    """«Вы получили 6 билетов за подписку на 6 месяцев»."""
+    tickets_word = _ru_plural(tickets_count, 'билет', 'билета', 'билетов')
+    months_word = _ru_plural(months, 'месяц', 'месяца', 'месяцев')
+    return f'Вы получили <b>{tickets_count}</b> {tickets_word} за подписку на {months} {months_word}'
+
+
 async def _notify_user_ticket(
     db: AsyncSession,
     user_id: int,
@@ -543,13 +630,20 @@ async def _notify_user_ticket(
     campaign: RaffleCampaign,
     *,
     tickets_count: int = 1,
+    months: int = 0,
 ) -> None:
     try:
         user = await get_user_by_id(db, user_id)
         if not user or not getattr(user, 'telegram_id', None):
             return
 
-        if tickets_count > 1:
+        if months > 0:
+            text = (
+                f'🎟 {ticket_grant_headline(tickets_count, months)}\n\n'
+                f'Кампания: <b>{html.escape(campaign.name)}</b>\n'
+                f'Код билета: <code>{html.escape(ticket.ticket_code)}</code>'
+            )
+        elif tickets_count > 1:
             text = (
                 f'🎟 Вам выдано билетов розыгрыша: <b>{tickets_count}</b>\n\n'
                 f'Кампания: <b>{html.escape(campaign.name)}</b>\n'
@@ -575,6 +669,7 @@ async def _notify_user_ticket(
                     'ticket_code': ticket.ticket_code,
                     'campaign_name': campaign.name,
                     'tickets_count': tickets_count,
+                    'months': months,
                 },
                 bot=bot,
                 telegram_message=text,
@@ -869,8 +964,8 @@ async def _notify_admins_draw(
 
 
 class RaffleService:
-    async def issue_for_purchase(self, db, user_id, transaction_id, tariff_id=None):
-        return await issue_for_purchase(db, user_id, transaction_id, tariff_id=tariff_id)
+    async def issue_for_purchase(self, db, user_id, transaction_id, tariff_id=None, period_days=None):
+        return await issue_for_purchase(db, user_id, transaction_id, tariff_id=tariff_id, period_days=period_days)
 
     async def grant_tickets(self, db, user_id, count, **kwargs):
         return await grant_tickets(db, user_id, count, **kwargs)

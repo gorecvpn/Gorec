@@ -77,6 +77,7 @@ async def create_transaction(
     created_at: datetime | None = None,
     *,
     commit: bool = True,
+    period_days: int | None = None,
 ) -> Transaction:
     # SUBSCRIPTION_PAYMENT / GIFT_PAYMENT — always store as negative (debit from user balance)
     # Keep original for downstream consumers (events, contests)
@@ -177,7 +178,8 @@ async def create_transaction(
             try:
                 from app.services.raffle.service import issue_for_purchase
 
-                await issue_for_purchase(db, user_id, transaction.id)
+                # period_days=None → raffle parses the period from the description.
+                await issue_for_purchase(db, user_id, transaction.id, period_days=period_days)
             except Exception as exc:
                 logger.warning('Не удалось выдать билет розыгрыша', user_id=user_id, exc=exc)
 
@@ -195,6 +197,7 @@ async def emit_transaction_side_effects(
     external_id: str | None = None,
     is_completed: bool = True,
     description: str = '',
+    period_days: int | None = None,
 ) -> None:
     """Fire side-effects that were deferred when create_transaction(commit=False) was used.
 
@@ -256,7 +259,7 @@ async def emit_transaction_side_effects(
         try:
             from app.services.raffle.service import issue_for_purchase
 
-            await issue_for_purchase(db, user_id, transaction.id)
+            await issue_for_purchase(db, user_id, transaction.id, period_days=period_days)
         except Exception as exc:
             logger.warning('Не удалось выдать билет розыгрыша', user_id=user_id, exc=exc)
 

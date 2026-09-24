@@ -164,6 +164,7 @@ class AdminRaffleCampaignItem(BaseModel):
     tickets_per_purchase: int = 1
     tickets_by_tariff: dict[str, int] | None = None
     skip_trial_purchases: bool = True
+    tickets_per_month: bool = True
     tickets: int = 0
     unique_users: int = 0
     winners: int = 0
@@ -190,6 +191,7 @@ class CreateRaffleCampaignRequest(BaseModel):
     tickets_per_purchase: int = Field(1, ge=1, le=50)
     tickets_by_tariff: dict[str, int] | None = None
     skip_trial_purchases: bool = True
+    tickets_per_month: bool = True
     starts_at: datetime | None = None
     ends_at: datetime | None = None
 
@@ -208,6 +210,7 @@ class UpdateRaffleCampaignRequest(BaseModel):
     tickets_per_purchase: int | None = Field(None, ge=1, le=50)
     tickets_by_tariff: dict[str, int] | None = None
     skip_trial_purchases: bool | None = None
+    tickets_per_month: bool | None = None
     starts_at: datetime | None = None
 
 
@@ -344,6 +347,7 @@ def _campaign_item(campaign, stats: dict[str, int]) -> AdminRaffleCampaignItem:
         tickets_per_purchase=int(getattr(campaign, 'tickets_per_purchase', 1) or 1),
         tickets_by_tariff=tickets_by_tariff_for_api(getattr(campaign, 'tickets_by_tariff', None)),
         skip_trial_purchases=bool(getattr(campaign, 'skip_trial_purchases', True)),
+        tickets_per_month=bool(getattr(campaign, 'tickets_per_month', False)),
         tickets=stats.get('tickets', 0),
         unique_users=stats.get('unique_users', 0),
         winners=stats.get('winners', 0),
@@ -424,6 +428,7 @@ async def create_raffle_campaign(
         tickets_per_purchase=request.tickets_per_purchase,
         tickets_by_tariff=_normalize_tickets_by_tariff(request.tickets_by_tariff),
         skip_trial_purchases=request.skip_trial_purchases,
+        tickets_per_month=request.tickets_per_month,
     )
     logger.info('Admin created raffle campaign', campaign_id=campaign.id, admin_id=admin.id)
     return _campaign_item(campaign, {'tickets': 0, 'unique_users': 0, 'winners': 0})
@@ -587,6 +592,7 @@ async def update_raffle_campaign(
     tickets_per_purchase = None
     tickets_by_tariff = ...
     skip_trial = None
+    tickets_per_month = None
 
     if status_value == RaffleCampaignStatus.DRAFT.value:
         if 'starts_at' in provided and request.starts_at is not None:
@@ -597,14 +603,21 @@ async def update_raffle_campaign(
             tickets_by_tariff = _normalize_tickets_by_tariff(request.tickets_by_tariff)
         if request.skip_trial_purchases is not None:
             skip_trial = request.skip_trial_purchases
+        if request.tickets_per_month is not None:
+            tickets_per_month = request.tickets_per_month
     elif status_value in {
         RaffleCampaignStatus.ACTIVE.value,
         RaffleCampaignStatus.CLOSED.value,
     }:
         # Disallow changing ticket issuance rules on live/closed campaigns
-        if any(
-            k in provided for k in ('tickets_per_purchase', 'tickets_by_tariff', 'skip_trial_purchases', 'starts_at')
-        ):
+        ticket_rule_keys = (
+            'tickets_per_purchase',
+            'tickets_by_tariff',
+            'skip_trial_purchases',
+            'tickets_per_month',
+            'starts_at',
+        )
+        if any(k in provided for k in ticket_rule_keys):
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail='Cannot change ticket rules or starts_at on active/closed campaigns',
@@ -627,6 +640,7 @@ async def update_raffle_campaign(
         tickets_per_purchase=tickets_per_purchase,
         tickets_by_tariff=tickets_by_tariff,
         skip_trial_purchases=skip_trial,
+        tickets_per_month=tickets_per_month,
     )
     stats = await raffle_crud.get_campaign_ticket_stats(db, campaign.id)
     logger.info('Admin updated raffle campaign', campaign_id=campaign.id, admin_id=admin.id)

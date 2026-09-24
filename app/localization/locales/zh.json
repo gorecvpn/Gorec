@@ -2300,6 +2300,7 @@
   "RAFFLE_PRIZE_MULTI": "• {desc}（获奖人数：{n}）",
   "RAFFLE_HOW_HEADER": "🎟 <b>如何获得抽奖券</b>",
   "RAFFLE_HOW_PURCHASE": "购买订阅可获得 <b>{n}</b> 张抽奖券。",
+  "RAFFLE_HOW_PURCHASE_PER_MONTH": "每购买 1 个月订阅可获得 <b>{n}</b> 张抽奖券：1 个月 → {n}，3 个月 → {n3}，6 个月 → {n6}，12 个月 → {n12}。",
   "RAFFLE_HOW_TARIFF_NOTE": "部分套餐的抽奖券数量可能不同。",
   "RAFFLE_HOW_SKIP_TRIAL": "试用 / 免费购买不发放抽奖券。",
   "RAFFLE_PROGRESS_HEADER": "📊 <b>您的进度</b>",
