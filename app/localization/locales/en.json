@@ -2300,6 +2300,7 @@
   "RAFFLE_PRIZE_MULTI": "• {desc} (winners: {n})",
   "RAFFLE_HOW_HEADER": "🎟 <b>How to earn tickets</b>",
   "RAFFLE_HOW_PURCHASE": "For a subscription purchase — <b>{n}</b> ticket(s).",
+  "RAFFLE_HOW_PURCHASE_PER_MONTH": "For each month of a paid subscription — <b>{n}</b> ticket(s): 1 mo → {n}, 3 mo → {n3}, 6 mo → {n6}, 12 mo → {n12}.",
   "RAFFLE_HOW_TARIFF_NOTE": "Some tariffs may grant a different number of tickets.",
   "RAFFLE_HOW_SKIP_TRIAL": "Trial / free purchases do not grant tickets.",
   "RAFFLE_PROGRESS_HEADER": "📊 <b>Your progress</b>",
