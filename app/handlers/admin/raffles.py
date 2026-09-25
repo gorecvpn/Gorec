@@ -38,7 +38,7 @@ async def _render_menu(db: AsyncSession) -> tuple[str, types.InlineKeyboardMarku
     enabled = settings.is_raffle_enabled()
     campaigns = await raffle_crud.list_campaigns(db, limit=15)
     lines = [
-        '🎟 <b>Розыгрыш билетов</b>',
+        '🎁 <b>Розыгрыш билетов</b>',
         f'RAFFLE_ENABLED: <b>{"on" if enabled else "off"}</b>',
         '',
     ]
@@ -61,7 +61,7 @@ async def _render_menu(db: AsyncSession) -> tuple[str, types.InlineKeyboardMarku
                 )
             ]
         )
-    keyboard.append([types.InlineKeyboardButton(text='⬅️ Назад', callback_data='admin_promo_submenu')])
+    keyboard.append([types.InlineKeyboardButton(text='⬅️ Назад', callback_data='admin_submenu_promo')])
     return '\n'.join(lines), types.InlineKeyboardMarkup(inline_keyboard=keyboard)
 
 
