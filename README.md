@@ -6,7 +6,7 @@
 
 Принимает оплату, выдаёт подписки, управляет пользователями — пока вы спите.
 
-[![Python 3.13+](https://img.shields.io/badge/Python-3.13+-3776AB?style=for-the-badge&logo=python&logoColor=white)](https://python.org)
+[![Python 3.14+](https://img.shields.io/badge/Python-3.14+-3776AB?style=for-the-badge&logo=python&logoColor=white)](https://python.org)
 [![PostgreSQL](https://img.shields.io/badge/PostgreSQL-15+-4169E1?style=for-the-badge&logo=postgresql&logoColor=white)](https://postgresql.org)
 [![Docker](https://img.shields.io/badge/Docker-Ready-2496ED?style=for-the-badge&logo=docker&logoColor=white)](https://www.docker.com/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green?style=for-the-badge)](LICENSE)
@@ -51,7 +51,7 @@ GorecBot — полнофункциональная платформа для п
 
 ### 💳 Платежи
 
-- 🏦 **27 платёжных провайдеров** одновременно
+- 🏦 **28 платёжных провайдеров** одновременно
 - 💰 Единый баланс: пополнение любым способом → покупка с баланса
 - ⚡ Автопокупка подписки после пополнения
 - 💾 Рекуррентные платежи (сохранённые карты)
@@ -69,7 +69,7 @@ GorecBot — полнофункциональная платформа для п
 - 🏷 Промокоды (деньги, дни подписки, триалы)
 - 👥 Реферальная программа с выводом средств
 - 👥 Партнерская система
-- 📨 Рассылки по сегментам пользователей
+- 📨 Рассылки по [условиям аудитории](docs/broadcast_audiences.md) с предпросмотром получателей
 - 🌐 Кастомные лендинги с аналитикой
 - 🎮 Конкурсы и ежедневные игры с призами
 - 🎯 Персональные предложения и скидки
@@ -173,6 +173,7 @@ GorecBot поддерживает полный кросс-канальный ж�
 | 🍩 | **[Donut](https://t.me/donut_payment)** | Карты, СБП по телефону, СБП QR (P2P) | RUB |
 | 🌋 | **Lava Business** | Карты, СБП (gate.lava.ru) | RUB |
 | 💳 | **CisPay** | СБП, карты (api.cispay.app) | RUB |
+| 💳 | **Cashera** | СБП, карты, зарубежные карты, крипта, CryptoBot (api.cashera.cash) | RUB → USDT |
 | 💳 | **TabPay** | СБП, карты с 3-D Secure (tabpay.org) | RUB |
 | 💳 | **ParityPay** | СБП, карты (api.paritypay.net) | RUB |
 | 🍎 | **Apple In-App Purchase** | Покупки через iOS App Store | USD |
@@ -190,15 +191,20 @@ docker compose up -d
 ```
 
 
+> [!IMPORTANT]
+> **Обновляетесь с версии на PostgreSQL 15?** После `git pull` выполните `make pg-upgrade` —
+> скрипт сделает резервную копию и перенесёт базу на PostgreSQL 18 без потерь.
+> Подробно: [docs/postgresql-18-upgrade.md](docs/postgresql-18-upgrade.md)
+
 ---
 
 ## 🏗 Стек
 
 | | Компонент | Технология |
 |:---:|:---|:---|
-| 🐍 | Язык | Python 3.13, полностью async |
+| 🐍 | Язык | Python 3.14, полностью async |
 | 🤖 | Telegram | aiogram 3.x |
-| 🗄 | База данных | PostgreSQL + SQLAlchemy 2.x + Alembic |
+| 🗄 | База данных | PostgreSQL 18 + SQLAlchemy 2.x + Alembic |
 | 🔴 | Кэш/очереди | Redis |
 | ⚡ | Web-сервер | FastAPI (webhook, платежи, Cabinet API) |
 | 📝 | Логирование | structlog |
