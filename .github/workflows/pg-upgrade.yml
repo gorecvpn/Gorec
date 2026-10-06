@@ -29,8 +29,8 @@ permissions:
 
 env:
   # Последний docker-compose.yml с PostgreSQL 15 — так выглядят установки
-  # пользователей до перехода.
-  OLD_COMPOSE_REF: e90256d9
+  # пользователей до перехода (Gorec main до слияния upstream 5.0.0).
+  OLD_COMPOSE_REF: df48be0bf01747761c433f34227ce0f1f93d16e4
   PG_USER: remnawave_user
   PG_DB: remnawave_bot
 
