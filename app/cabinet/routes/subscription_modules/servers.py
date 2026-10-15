@@ -17,7 +17,7 @@ from app.database.models import User
 from app.services.subscription_service import SubscriptionService
 
 from ...dependencies import get_cabinet_db, get_current_cabinet_user
-from .helpers import resolve_subscription
+from .helpers import ensure_not_paused, resolve_subscription
 
 
 logger = structlog.get_logger(__name__)
@@ -112,6 +112,7 @@ async def update_countries(
     from app.utils.pricing_utils import apply_percentage_discount, calculate_prorated_price
 
     subscription = await resolve_subscription(db, user, subscription_id)
+    ensure_not_paused(subscription)
 
     if not subscription:
         raise HTTPException(

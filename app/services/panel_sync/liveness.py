@@ -39,6 +39,10 @@ def is_subscription_live(user, subscription, *, now: datetime | None = None) -> 
     if getattr(subscription, 'status', None) not in _LIVE_STATUSES:
         return False
 
+    # Пауза пользователем: аккаунт в панели отключён, дата заморожена в будущем.
+    if getattr(subscription, 'is_paused', False) is True:
+        return False
+
     end_date = getattr(subscription, 'end_date', None)
     if end_date is None:
         return False

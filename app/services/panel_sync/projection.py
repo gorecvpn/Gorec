@@ -396,6 +396,11 @@ def project_onto_subscription(
         # принял это за продление.
         return changed
 
+    if getattr(subscription, 'is_paused', False) is True:
+        # Пауза пользователем: бот держит дату и статус сам (панель на паузе
+        # DISABLED с замороженной датой) — снимок их не переписывает.
+        return changed
+
     if panel_date_is_grace_tail(subscription, snapshot):
         # Хвост грейса: в панели стоит дата, которую оставил сам грейс-доступ
         # (прошедшую дату PATCH не принимает, настоящую не вернуть). Это не

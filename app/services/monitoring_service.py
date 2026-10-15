@@ -793,7 +793,11 @@ class MonitoringService:
             current_time = datetime.now(UTC)
             is_active = is_subscription_live(user, subscription, now=current_time)
 
-            if subscription.status == SubscriptionStatus.ACTIVE.value and subscription.end_date <= current_time:
+            if (
+                subscription.status == SubscriptionStatus.ACTIVE.value
+                and subscription.end_date <= current_time
+                and not getattr(subscription, 'is_paused', False)
+            ):
                 # Суточные подписки управляются DailySubscriptionService — не экспайрим
                 tariff = getattr(subscription, 'tariff', None)
                 is_active_daily = (
@@ -1538,6 +1542,7 @@ class MonitoringService:
                     Subscription.is_trial == False,
                     Subscription.end_date > current_time,
                     Subscription.end_date <= threshold_date,
+                    Subscription.is_paused.is_(False),
                     User.status == UserStatus.ACTIVE.value,
                 )
             )

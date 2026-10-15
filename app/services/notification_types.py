@@ -97,6 +97,9 @@ class NotificationType(Enum):
     RAFFLE_TICKET = 'raffle_ticket'
     RAFFLE_WINNER = 'raffle_winner'
     RAFFLE_REMINDER = 'raffle_reminder'
+    SUBSCRIPTION_PAUSED = 'subscription_paused'
+    SUBSCRIPTION_PAUSE_ENDING = 'subscription_pause_ending'
+    SUBSCRIPTION_RESUMED = 'subscription_resumed'
 
     # Guest purchase notifications
     GUEST_SUBSCRIPTION_DELIVERED = 'guest_subscription_delivered'

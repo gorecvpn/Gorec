@@ -37,7 +37,7 @@ from ...schemas.subscription import (
     TrafficPackageResponse,
     TrafficPurchaseRequest,
 )
-from .helpers import _apply_addon_discount, resolve_subscription
+from .helpers import _apply_addon_discount, ensure_not_paused, resolve_subscription
 
 
 logger = structlog.get_logger(__name__)
@@ -170,6 +170,7 @@ async def purchase_traffic(
     from app.utils.pricing_utils import calculate_prorated_price
 
     subscription = await resolve_subscription(db, user, subscription_id)
+    ensure_not_paused(subscription)
 
     ensure_subscription_has_tariff(subscription)
 
@@ -462,6 +463,7 @@ async def save_traffic_cart(
     """Save cart for traffic purchase (for insufficient balance flow)."""
 
     subscription = await resolve_subscription(db, user, subscription_id)
+    ensure_not_paused(subscription)
 
     ensure_subscription_has_tariff(subscription)
 
@@ -578,6 +580,7 @@ async def switch_traffic_package(
     from app.utils.pricing_utils import calculate_prorated_price
 
     subscription = await resolve_subscription(db, user, subscription_id)
+    ensure_not_paused(subscription)
 
     ensure_subscription_has_tariff(subscription)
 

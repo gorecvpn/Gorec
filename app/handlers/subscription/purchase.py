@@ -573,6 +573,12 @@ async def show_subscription_info(callback: types.CallbackQuery, db_user: User, d
             '📱 Скопируйте ссылку и добавьте в ваше VPN приложение',
         )
 
+    from .pause import pause_status_block
+
+    pause_block = pause_status_block(texts, subscription)
+    if pause_block:
+        message = pause_block + '\n\n' + message
+
     await callback.message.edit_text(
         message,
         reply_markup=get_subscription_keyboard(
@@ -4139,6 +4145,9 @@ async def handle_trial_payment_method(callback: types.CallbackQuery, db_user: Us
 
 
 def register_handlers(dp: Dispatcher):
+    from .pause import register_pause_handlers
+
+    register_pause_handlers(dp)
     update_traffic_prices()
 
     dp.callback_query.register(show_subscription_info, F.data == 'menu_subscription')

@@ -8,6 +8,7 @@ from .autopay import router as autopay_router
 from .cashera_recurrent import router as cashera_recurrent_router
 from .daily import router as daily_router
 from .devices import router as devices_router
+from .freeze import router as freeze_router
 from .lava_recurrent import router as lava_recurrent_router
 from .multi_tariff import router as multi_tariff_router
 from .platega_recurrent import router as platega_recurrent_router
@@ -25,6 +26,7 @@ __all__ = [
     'cashera_recurrent_router',
     'daily_router',
     'devices_router',
+    'freeze_router',
     'lava_recurrent_router',
     'multi_tariff_router',
     'platega_recurrent_router',

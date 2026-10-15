@@ -248,6 +248,13 @@ def _subscription_to_response(
         traffic_purchases=traffic_purchases or [],
         is_daily=is_daily,
         is_daily_paused=is_daily_paused,
+        is_paused=bool(getattr(subscription, 'is_paused', False) is True),
+        pause_planned_until=(
+            subscription.pause_planned_until if getattr(subscription, 'is_paused', False) is True else None
+        ),
+        pause_remaining_days=(
+            _pause_remaining_days(subscription) if getattr(subscription, 'is_paused', False) is True else None
+        ),
         daily_price_kopeks=daily_price_kopeks,
         next_daily_charge_at=next_daily_charge_at,
         tariff_id=tariff_id,
@@ -255,3 +262,25 @@ def _subscription_to_response(
         traffic_reset_mode=traffic_reset_mode,
         requires_tariff_selection=requires_tariff_selection,
     )
+
+
+def ensure_not_paused(subscription: Subscription | None) -> None:
+    """Платные изменения подписки на паузе запрещены: цена считается от даты
+    окончания, а она на паузе заморожена. Сначала выйти из паузы (остаток
+    вернётся полностью), потом менять."""
+    if subscription is not None and getattr(subscription, 'is_paused', False):
+        from fastapi import HTTPException
+
+        raise HTTPException(
+            status_code=409,
+            detail={
+                'code': 'subscription_paused',
+                'message': 'Subscription is paused. Resume it first.',
+            },
+        )
+
+
+def _pause_remaining_days(subscription: Subscription) -> int:
+    from app.services.subscription_pause_service import remaining_days
+
+    return remaining_days(subscription)

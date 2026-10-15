@@ -41,7 +41,7 @@ from app.services.user_cart_service import user_cart_service
 
 from ...dependencies import get_cabinet_db, get_current_cabinet_user
 from ...schemas.subscription import DevicePurchaseRequest
-from .helpers import _apply_addon_discount, resolve_subscription
+from .helpers import _apply_addon_discount, ensure_not_paused, resolve_subscription
 
 
 logger = structlog.get_logger(__name__)
@@ -90,6 +90,7 @@ async def purchase_devices_legacy(
 
     # Resolve subscription (ownership validated), then lock the row for concurrent safety
     resolved = await resolve_subscription(db, user, subscription_id)
+    ensure_not_paused(resolved)
     ensure_subscription_has_tariff(resolved)
     if not resolved:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail='No subscription found')
@@ -356,6 +357,7 @@ async def purchase_devices(
     try:
         # Resolve subscription (ownership validated), then lock the row for concurrent safety
         resolved = await resolve_subscription(db, user, subscription_id)
+        ensure_not_paused(resolved)
         ensure_subscription_has_tariff(resolved)
         if not resolved:
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail='У вас нет активной подписки')
@@ -666,6 +668,7 @@ async def save_devices_cart(
 ) -> dict[str, bool]:
     """Save cart for device purchase (for insufficient balance flow)."""
     subscription = await resolve_subscription(db, user, subscription_id)
+    ensure_not_paused(subscription)
     ensure_subscription_has_tariff(subscription)
 
     if not subscription:
@@ -1285,6 +1288,7 @@ async def reduce_devices(
 
     # Resolve subscription (ownership validated), then lock the row for concurrent safety
     resolved = await resolve_subscription(db, user, subscription_id)
+    ensure_not_paused(resolved)
     if not resolved:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail='No subscription found')
 

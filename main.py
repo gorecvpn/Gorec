@@ -43,6 +43,7 @@ from app.services.referral_contest_service import referral_contest_service
 from app.services.remnawave_sync_service import remnawave_sync_service
 from app.services.reporting_service import reporting_service
 from app.services.riopay_service import riopay_service
+from app.services.subscription_pause_scheduler_service import subscription_pause_scheduler_service
 from app.services.system_settings_service import bot_configuration_service
 from app.services.traffic_monitoring_service import traffic_monitoring_scheduler
 from app.services.version_service import version_service
@@ -482,6 +483,18 @@ async def main():
             except Exception as e:
                 stage.warning(f'Ошибка запуска планировщика розыгрыша: {e}')
                 logger.error('❌ Ошибка запуска планировщика розыгрыша', error=e)
+
+        async with timeline.stage(
+            'Пауза подписок',
+            '⏸',
+            success_message='Планировщик паузы подписок готов',
+        ) as stage:
+            try:
+                await subscription_pause_scheduler_service.start()
+                stage.log('Авто-возобновление и напоминания паузы запущены')
+            except Exception as e:
+                stage.warning(f'Ошибка запуска планировщика паузы: {e}')
+                logger.error('❌ Ошибка запуска планировщика паузы подписок', error=e)
 
         if settings.is_log_rotation_enabled():
             async with timeline.stage(
@@ -1079,6 +1092,11 @@ async def main():
             await raffle_scheduler_service.stop()
         except Exception as e:
             logger.error('Ошибка остановки планировщика розыгрыша', error=e)
+
+        try:
+            await subscription_pause_scheduler_service.stop()
+        except Exception as e:
+            logger.error('Ошибка остановки планировщика паузы подписок', error=e)
 
         if settings.is_log_rotation_enabled():
             logger.info('ℹ️ Остановка сервиса ротации логов...')

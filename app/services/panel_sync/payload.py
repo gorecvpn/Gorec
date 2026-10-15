@@ -150,6 +150,15 @@ def resolve_panel_status(user, subscription, *, is_live: bool, now: datetime) ->
     return UserStatus.DISABLED
 
 
+def _external_squad_for(subscription, tariff) -> str | None:
+    """Внешний сквад: на паузе — сквад «Пауза» (если задан), иначе тарифа."""
+    if getattr(subscription, 'is_paused', False) is True:
+        pause_squad = settings.get_subscription_pause_external_squad_uuid()
+        if pause_squad:
+            return pause_squad
+    return getattr(tariff, 'external_squad_uuid', None)
+
+
 def _end_date_ahead(subscription, *, now: datetime) -> bool:
     end_date = getattr(subscription, 'end_date', None)
     if end_date is None:
@@ -212,7 +221,7 @@ def build_panel_payload(
         ),
         active_internal_squads=tuple(getattr(subscription, 'connected_squads', None) or ()),
         hwid_device_limit=resolve_hwid_device_limit_for_payload(subscription),
-        external_squad_uuid=getattr(tariff, 'external_squad_uuid', None),
+        external_squad_uuid=_external_squad_for(subscription, tariff),
         # Вызывающий мог посчитать тег сам (тем же правилом); иначе берём его здесь —
         # так тег тарифа доходит до панели из любой точки записи.
         tag=user_tag if user_tag is not None else resolve_panel_user_tag(subscription),
