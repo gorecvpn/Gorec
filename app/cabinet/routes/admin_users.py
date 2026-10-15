@@ -6,6 +6,7 @@ from datetime import UTC, datetime, timedelta
 
 import structlog
 from fastapi import APIRouter, Depends, HTTPException, Query, status
+from pydantic import BaseModel, Field
 from sqlalchemy import Integer, delete as sa_delete, func, literal, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
@@ -4184,3 +4185,99 @@ def _build_gift_item(
         paid_at=p.paid_at,
         delivered_at=p.delivered_at,
     )
+
+
+# ---------------------------------------------------------------------------
+# Пауза (заморозка) подписки — принудительно админом
+# ---------------------------------------------------------------------------
+
+
+class AdminSubscriptionFreezeRequest(BaseModel):
+    days: int = Field(..., ge=1, le=365)
+
+
+async def _admin_pause_target(db: AsyncSession, user_id: int, sub_id: int):
+    from app.database.crud.subscription import get_subscription_by_id_for_user
+
+    user = await get_user_by_id(db, user_id)
+    if not user:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail='User not found')
+    subscription = await get_subscription_by_id_for_user(db, sub_id, user_id)
+    if not subscription:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail='Subscription not found')
+    return user, subscription
+
+
+async def _admin_pause_state(db: AsyncSession, user, subscription) -> dict:
+    from app.services import subscription_pause_service as pause_service
+
+    eligibility = None
+    if not getattr(subscription, 'is_paused', False):
+        eligibility = await pause_service.get_eligibility(db, user, subscription, ignore_limit=True)
+    data = pause_service.pause_state_dict(subscription, eligibility=eligibility)
+    data['subscription_id'] = subscription.id
+    return data
+
+
+def _admin_pause_http_error(exc) -> HTTPException:
+    code = getattr(exc, 'code', 'not_allowed')
+    return HTTPException(
+        status_code=status.HTTP_409_CONFLICT
+        if code in ('already_paused', 'not_paused')
+        else status.HTTP_400_BAD_REQUEST,
+        detail={'code': code, 'message': str(exc)},
+    )
+
+
+@router.get('/{user_id}/subscriptions/{sub_id}/freeze')
+async def admin_get_subscription_freeze(
+    user_id: int,
+    sub_id: int,
+    admin: User = Depends(require_permission('users:read')),
+    db: AsyncSession = Depends(get_cabinet_db),
+):
+    user, subscription = await _admin_pause_target(db, user_id, sub_id)
+    return await _admin_pause_state(db, user, subscription)
+
+
+@router.post('/{user_id}/subscriptions/{sub_id}/freeze')
+async def admin_freeze_subscription(
+    user_id: int,
+    sub_id: int,
+    request: AdminSubscriptionFreezeRequest,
+    admin: User = Depends(require_permission('users:subscription')),
+    db: AsyncSession = Depends(get_cabinet_db),
+):
+    """Принудительно поставить подписку на паузу (без лимита пауз пользователя)."""
+    from app.services import subscription_pause_service as pause_service
+
+    user, subscription = await _admin_pause_target(db, user_id, sub_id)
+    try:
+        await pause_service.pause_subscription(
+            db, user, subscription, request.days, initiator=pause_service.INITIATOR_ADMIN
+        )
+    except pause_service.SubscriptionPauseError as exc:
+        raise _admin_pause_http_error(exc) from exc
+    logger.info('Админ поставил подписку на паузу', admin_id=admin.id, user_id=user_id, subscription_id=sub_id)
+    await pause_service.notify_paused(user, subscription)
+    return await _admin_pause_state(db, user, subscription)
+
+
+@router.post('/{user_id}/subscriptions/{sub_id}/unfreeze')
+async def admin_unfreeze_subscription(
+    user_id: int,
+    sub_id: int,
+    admin: User = Depends(require_permission('users:subscription')),
+    db: AsyncSession = Depends(get_cabinet_db),
+):
+    """Принудительно снять подписку с паузы (остаток возвращается полностью)."""
+    from app.services import subscription_pause_service as pause_service
+
+    user, subscription = await _admin_pause_target(db, user_id, sub_id)
+    try:
+        await pause_service.resume_subscription(db, user, subscription, reason=pause_service.RESUME_ADMIN)
+    except pause_service.SubscriptionPauseError as exc:
+        raise _admin_pause_http_error(exc) from exc
+    logger.info('Админ снял подписку с паузы', admin_id=admin.id, user_id=user_id, subscription_id=sub_id)
+    await pause_service.notify_resumed(user, subscription)
+    return await _admin_pause_state(db, user, subscription)

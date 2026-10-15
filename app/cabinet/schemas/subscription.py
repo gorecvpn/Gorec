@@ -53,6 +53,10 @@ class SubscriptionData(BaseModel):
     # Daily tariff fields
     is_daily: bool = False
     is_daily_paused: bool = False
+    # Пауза (заморозка) подписки пользователем — не суточная пауза
+    is_paused: bool = False
+    pause_planned_until: datetime | None = None
+    pause_remaining_days: int | None = None
     daily_price_kopeks: int | None = None
     next_daily_charge_at: datetime | None = None  # When next daily charge will happen
     tariff_id: int | None = None

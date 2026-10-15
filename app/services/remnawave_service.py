@@ -3233,6 +3233,7 @@ class RemnaWaveService:
                             and subscription.status == SubscriptionStatus.ACTIVE.value
                             and not is_recently_updated_by_webhook(subscription)
                             and not is_active_daily
+                            and not getattr(subscription, 'is_paused', False)
                         ):
                             time_since_expiry = current_time - end_date_utc
                             logger.warning(

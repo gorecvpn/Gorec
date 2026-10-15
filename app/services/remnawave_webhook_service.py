@@ -48,6 +48,22 @@ from app.utils.miniapp_buttons import build_miniapp_or_callback_button, build_su
 
 logger = structlog.get_logger(__name__)
 
+# События панели, которые на подписке «на паузе» игнорируются (статус и срок держит бот).
+_PAUSE_SUPPRESSED_EVENTS = frozenset(
+    {
+        'user.expired',
+        'user.disabled',
+        'user.enabled',
+        'user.limited',
+        'user.expiration',
+        'user.expires_in_72_hours',
+        'user.expires_in_48_hours',
+        'user.expires_in_24_hours',
+        'user.expired_24_hours_ago',
+        'user.not_connected',
+    }
+)
+
 
 # Mapping from locale text_key to NotificationType for unified delivery
 _TEXT_KEY_TO_NOTIFICATION_TYPE: dict[str, NotificationType] = {
@@ -390,6 +406,20 @@ class RemnaWaveWebhookService:
         ):
             logger.info(
                 'RemnaWave webhook suppressed as a grace overlay echo',
+                event_name=event_name,
+                subscription_id=subscription.id,
+            )
+            return True
+
+        if (
+            subscription is not None
+            and getattr(subscription, 'is_paused', False) is True
+            and event_name in _PAUSE_SUPPRESSED_EVENTS
+        ):
+            # Пауза пользователем: disabled/enabled/истечение от панели — эхо
+            # нашей же паузы (или правка мимо бота); статус держит бот.
+            logger.info(
+                'RemnaWave webhook suppressed: subscription is paused',
                 event_name=event_name,
                 subscription_id=subscription.id,
             )

@@ -2638,6 +2638,7 @@ class Subscription(Base):
         # shortUuid пережил 3.0.0 и остаётся единственным панельным ключом,
         # которым можно резолвить строку, потерявшую связь.
         Index('ix_subscriptions_remnawave_short_uuid', 'remnawave_short_uuid'),
+        Index('ix_subscriptions_paused_planned_until', 'pause_planned_until', postgresql_where=text('is_paused')),
     )
 
     id = Column(Integer, primary_key=True, index=True)
@@ -2719,6 +2720,14 @@ class Subscription(Base):
         Boolean, default=False, nullable=False
     )  # Приостановлена ли суточная подписка пользователем
     last_daily_charge_at = Column(AwareDateTime(), nullable=True)  # Время последнего суточного списания
+
+    # Пауза (заморозка) подписки пользователем — отдельное состояние, не путать с
+    # is_daily_paused. Пока is_paused: аккаунт в панели отключён, end_date
+    # заморожена как pause_planned_until + остаток, остаток хранится в секундах.
+    is_paused = Column(Boolean, nullable=False, default=False, server_default=text('false'))
+    paused_at = Column(AwareDateTime(), nullable=True)
+    pause_planned_until = Column(AwareDateTime(), nullable=True)
+    pause_remaining_seconds = Column(BigInteger, nullable=True)
 
     user = relationship('User', back_populates='subscriptions')
     tariff = relationship('Tariff', back_populates='subscriptions')
@@ -3809,6 +3818,30 @@ class PromoOfferTemplate(Base):
     updated_at = Column(AwareDateTime(), default=func.now(), onupdate=func.now())
 
     creator = relationship('User')
+
+
+class SubscriptionPause(Base):
+    """История пауз (заморозок) подписки пользователем."""
+
+    __tablename__ = 'subscription_pauses'
+    __table_args__ = (
+        Index('ix_subscription_pauses_subscription_paused_at', 'subscription_id', 'paused_at'),
+        Index('ix_subscription_pauses_user_paused_at', 'user_id', 'paused_at'),
+    )
+
+    id = Column(Integer, primary_key=True)
+    subscription_id = Column(Integer, ForeignKey('subscriptions.id', ondelete='CASCADE'), nullable=False)
+    user_id = Column(Integer, ForeignKey('users.id', ondelete='CASCADE'), nullable=False)
+    paused_at = Column(AwareDateTime(), nullable=False)
+    planned_until = Column(AwareDateTime(), nullable=False)
+    remaining_seconds = Column(BigInteger, nullable=False)
+    resumed_at = Column(AwareDateTime(), nullable=True)
+    # manual | auto | purchase | admin
+    resume_reason = Column(String(16), nullable=True)
+    # user | admin
+    initiator = Column(String(16), nullable=False, default='user', server_default='user')
+    reminder_sent_at = Column(AwareDateTime(), nullable=True)
+    created_at = Column(AwareDateTime(), default=func.now())
 
 
 class SubscriptionTemporaryAccess(Base):

@@ -102,7 +102,11 @@ def _subscription_sql(condition: SubscriptionCondition, now: datetime) -> Column
     if segment == 'trial':
         return exists().where(_alive_sub(now), Subscription.is_trial.is_(True))
     if segment == 'expiring':
-        return exists().where(_alive_sub(now), Subscription.end_date <= now + timedelta(days=condition.days))
+        return exists().where(
+            _alive_sub(now),
+            Subscription.end_date <= now + timedelta(days=condition.days),
+            Subscription.is_paused.is_(False),
+        )
     if segment == 'tariff':
         return exists().where(_alive_sub(now), Subscription.tariff_id == condition.tariff_id)
     if segment == 'low_balance':

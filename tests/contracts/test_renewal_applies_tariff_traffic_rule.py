@@ -30,6 +30,7 @@ APP = pathlib.Path(__file__).resolve().parents[2] / 'app'
 
 #: Функции, которые двигают дату, но правило тарифа применять не должны — с причиной.
 KNOWN_WITHOUT_RULE: dict[str, str] = {
+    'app/services/subscription_pause_service.py::apply_pause_state': 'пауза пользователем: дата замораживается (конец паузы + остаток), лимит и трафик не меняются',
     'app/database/models.py::Subscription.extend_subscription': 'сам метод модели — правило зовут его вызывающие',
     'app/database/crud/subscription.py::extend_subscription': 'само общее продление: правило внутри (уборка лимита)',
     'app/database/crud/subscription.py::activate_pending_subscription': (

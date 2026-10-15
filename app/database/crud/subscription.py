@@ -1173,6 +1173,14 @@ async def extend_subscription(
     # взять lock через with_for_update).
     await _lock_subscription_row(db, subscription)
 
+    if getattr(subscription, 'is_paused', False):
+        # Покупка/продление на паузе: сначала выйти из паузы (остаток возвращается
+        # полностью, срок считается от него), иначе продление легло бы поверх
+        # замороженной даты и подарило бы оставшиеся дни паузы.
+        from app.services.subscription_pause_service import resume_before_purchase
+
+        await resume_before_purchase(db, subscription)
+
     if days > 0:
         # Оверлей грейса, осевший в подписке (v4.10–4.11 принимали его за продление
         # в панели), — не условия подписки: сквад грейса, «расход + квота», дата
@@ -1852,6 +1860,7 @@ async def get_expiring_subscriptions(db: AsyncSession, days_before: int = 3) -> 
                 User.status == UserStatus.ACTIVE.value,
                 Subscription.end_date <= threshold_date,
                 Subscription.end_date > datetime.now(UTC),
+                Subscription.is_paused.is_(False),
                 # Не включаем активные суточные подписки — у них end_date всегда +24ч
                 ~and_(
                     Tariff.is_daily.is_(True),
@@ -1876,6 +1885,7 @@ async def get_expired_subscriptions(db: AsyncSession) -> list[Subscription]:
                 Subscription.status == SubscriptionStatus.ACTIVE.value,
                 User.status == UserStatus.ACTIVE.value,
                 Subscription.end_date <= datetime.now(UTC),
+                Subscription.is_paused.is_(False),
                 # Не трогаем активные суточные подписки — ими управляет DailySubscriptionService
                 ~and_(
                     Tariff.is_daily.is_(True),
@@ -1903,6 +1913,7 @@ async def get_subscriptions_for_autopay(db: AsyncSession) -> list[Subscription]:
                 User.status == UserStatus.ACTIVE.value,
                 Subscription.autopay_enabled == True,
                 Subscription.is_trial == False,
+                Subscription.is_paused.is_(False),
             )
         )
     )
@@ -2436,6 +2447,10 @@ async def check_and_update_subscription_status(db: AsyncSession, subscription: S
     is_daily_paused = getattr(subscription, 'is_daily_paused', False)
     if is_daily_paused:
         logger.info('⏸️ Суточная подписка на паузе, пропускаем проверку истечения', subscription_id=subscription.id)
+        return subscription
+
+    if getattr(subscription, 'is_paused', False):
+        # Пауза пользователем: срок заморожен, истечение не проверяем.
         return subscription
 
     # Активные суточные подписки управляются DailySubscriptionService — не экспайрим их тут.

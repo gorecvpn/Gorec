@@ -528,6 +528,21 @@ class Settings(BaseSettings):
     RAFFLE_REMINDER_ENABLED: bool = True
     RAFFLE_REMINDER_HOURS_BEFORE: int = 24
     CONTESTS_BUTTON_VISIBLE: bool = False
+
+    # Пауза (заморозка) подписки пользователем: бот/кабинет, бесплатно.
+    # Неиспользованные дни возвращаются полностью при выходе из паузы.
+    SUBSCRIPTION_PAUSE_ENABLED: bool = True
+    SUBSCRIPTION_PAUSE_MAX_DAYS: int = 30  # Максимум дней одной паузы (по окончании — авто-возобновление)
+    SUBSCRIPTION_PAUSE_DAY_OPTIONS: str = '7,14,30'  # Варианты длительности паузы в днях
+    SUBSCRIPTION_PAUSE_MIN_REMAINING_DAYS: int = 1  # Минимальный остаток подписки для паузы
+    SUBSCRIPTION_PAUSE_LIMIT_COUNT: int = 3  # Сколько пауз можно начать за окно (0 = без лимита)
+    SUBSCRIPTION_PAUSE_LIMIT_WINDOW_DAYS: int = 30  # Окно для лимита пауз, дней
+    SUBSCRIPTION_PAUSE_REMINDER_HOURS_BEFORE: int = 24  # Напоминание до авто-возобновления
+    SUBSCRIPTION_PAUSE_CHECK_INTERVAL_SECONDS: int = 300  # Период планировщика авто-возобновления
+    # Внешний сквад Remnawave «Пауза» (UUID). Пока подписка на паузе, аккаунт в панели
+    # переводится в этот сквад: его customRemarks/announce/profile-title показывают в
+    # Happ/INCY «подписка на паузе». Пусто — используются общие remarks отключённых.
+    SUBSCRIPTION_PAUSE_EXTERNAL_SQUAD_UUID: str = ''
     # Для обратной совместимости со старыми конфигами
     REFERRAL_CONTESTS_ENABLED: bool = False
 
@@ -3695,6 +3710,27 @@ class Settings(BaseSettings):
         if self.is_happ_cryptolink_mode():
             return False
         return self.HIDE_SUBSCRIPTION_LINK
+
+    def is_subscription_pause_enabled(self) -> bool:
+        return bool(getattr(self, 'SUBSCRIPTION_PAUSE_ENABLED', False))
+
+    def get_subscription_pause_day_options(self) -> list[int]:
+        """Варианты длительности паузы: целые > 0, не больше максимума, по возрастанию."""
+        max_days = self.get_subscription_pause_max_days()
+        raw = str(getattr(self, 'SUBSCRIPTION_PAUSE_DAY_OPTIONS', '') or '')
+        options: set[int] = set()
+        for part in raw.replace(';', ',').split(','):
+            part = part.strip()
+            if part.isdigit() and 0 < int(part) <= max_days:
+                options.add(int(part))
+        return sorted(options) or [max_days]
+
+    def get_subscription_pause_max_days(self) -> int:
+        return max(1, int(getattr(self, 'SUBSCRIPTION_PAUSE_MAX_DAYS', 30) or 30))
+
+    def get_subscription_pause_external_squad_uuid(self) -> str | None:
+        value = str(getattr(self, 'SUBSCRIPTION_PAUSE_EXTERNAL_SQUAD_UUID', '') or '').strip()
+        return value or None
 
     def is_raffle_enabled(self) -> bool:
         return bool(getattr(self, 'RAFFLE_ENABLED', False))
