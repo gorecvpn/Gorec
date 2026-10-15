@@ -163,6 +163,7 @@ GorecBot поддерживает полный кросс-канальный ж�
 | 💳 | **MulenPay** | Карты | RUB |
 | 💳 | **RioPay** | Карты | RUB |
 | 💳 | **SeverPay** | СБП, карты | RUB |
+| 🤝 | **[PayPear](https://t.me/Paymen1_Manager)** | Карты, СБП, SberPay, T-Pay | RUB |
 | 🤝 | **[RollyPay](https://rollypay.io/)** | СБП, карты, крипто | RUB → USDT |
 | 🤝 | **[AuraPay](https://aurapay.tech/)** | Карты, СБП | RUB |
 | 🤝 | **[Overpay](https://overpay.pro/)** | Карты, СБП | RUB |
