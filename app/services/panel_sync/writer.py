@@ -711,3 +711,32 @@ async def create_managed_replacement(api, user, subscription, account, *, userna
     )
     payload = replace(payload, username=username, status=UserStatus.DISABLED)
     return await api.create_user(**payload.create_kwargs(now=now))
+
+
+async def patch_panel_pause(
+    api,
+    *,
+    user_id: int,
+    paused: bool,
+    expire_at: datetime,
+    external_squad_uuid: str | type(...) | None = ...,
+    update_call=None,
+) -> RemnaWaveUser:
+    """Пауза подписки пользователем: дата, внешний сквад и статус аккаунта.
+
+    Отдельный вход, потому что пауза меняет ровно три поля и обязана уметь
+    снимать внешний сквад «Пауза» явным null (общий писатель отсутствие сквада
+    передаёт отсутствием поля). Порядок: сначала дата и сквад, затем
+    disable/enable — на паузе аккаунт DISABLED с будущей датой, при выходе из
+    паузы включается уже с новой датой.
+
+    ``external_squad_uuid`` не передан — поле не трогается; ``None`` — снять.
+    """
+    update = update_call or api.update_user
+    kwargs: dict = {'user_id': user_id, 'expire_at': expire_at}
+    if external_squad_uuid is not ...:
+        kwargs['external_squad_uuid'] = external_squad_uuid
+    await update(**kwargs)
+    if paused:
+        return await api.disable_user(user_id)
+    return await api.enable_user(user_id)

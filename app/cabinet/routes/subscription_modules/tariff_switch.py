@@ -25,7 +25,7 @@ from app.services.tariff_switch_policy import remaining_days_for_switch, should_
 
 from ...dependencies import get_cabinet_db, get_current_cabinet_user
 from ...schemas.subscription import TariffPurchaseRequest
-from .helpers import _subscription_to_response, resolve_subscription
+from .helpers import _subscription_to_response, ensure_not_paused, resolve_subscription
 
 
 logger = structlog.get_logger(__name__)
@@ -69,7 +69,8 @@ async def preview_tariff_switch(
             detail='Tariffs mode is not enabled',
         )
 
-    subscription = await _resolve_switch_subscription(db, user, subscription_id)
+    subscription = await resolve_subscription(db, user, subscription_id)
+    ensure_not_paused(subscription)
 
     if not subscription or not subscription.tariff_id:
         raise HTTPException(
@@ -230,7 +231,8 @@ async def switch_tariff(
             detail='Tariffs mode is not enabled',
         )
 
-    resolved = await _resolve_switch_subscription(db, user, subscription_id)
+    resolved = await resolve_subscription(db, user, subscription_id)
+    ensure_not_paused(resolved)
 
     if not resolved or not resolved.tariff_id:
         raise HTTPException(

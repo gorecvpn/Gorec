@@ -18,6 +18,7 @@ from .subscription_modules import (
     cashera_recurrent_router,
     daily_router,
     devices_router,
+    freeze_router,
     lava_recurrent_router,
     platega_recurrent_router,
     purchase_router,
@@ -53,6 +54,7 @@ router.include_router(devices_router)
 router.include_router(servers_router)
 router.include_router(autopay_router)
 router.include_router(daily_router)
+router.include_router(freeze_router)
 router.include_router(tariff_switch_router)
 router.include_router(revoke_router)
 router.include_router(platega_recurrent_router)
