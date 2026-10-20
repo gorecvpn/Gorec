@@ -821,6 +821,18 @@ def get_main_menu_keyboard(
         row = paired_buttons[i : i + 2]
         keyboard.append(row)
 
+    # GorecVPN: кнопка перехода в веб-кабинет (только если CABINET_URL настроен).
+    cabinet_url = settings._normalized_cabinet_url()
+    if isinstance(cabinet_url, str) and cabinet_url.startswith('https://'):
+        keyboard.append(
+            [
+                InlineKeyboardButton(
+                    text=texts.t('MENU_CABINET', '🖥 Кабинет'),
+                    web_app=types.WebAppInfo(url=cabinet_url),
+                )
+            ]
+        )
+
     if settings.DEBUG:
         logger.debug('DEBUG KEYBOARD: админ кнопка', is_admin=is_admin)
 

@@ -2359,5 +2359,6 @@
   "SUBSCRIPTION_PAUSE_ERROR_TOO_LITTLE_REMAINING": "❌ До конца подписки осталось слишком мало времени для паузы.",
   "SUBSCRIPTION_PAUSE_ERROR_LIMIT_REACHED": "❌ Лимит пауз исчерпан. Следующая пауза доступна с {date}.",
   "SUBSCRIPTION_PAUSE_ERROR_INVALID_DAYS": "❌ Недопустимая длительность паузы.",
-  "SUBSCRIPTION_PAUSE_ERROR_NOT_PAUSED": "ℹ️ Подписка не на паузе."
+  "SUBSCRIPTION_PAUSE_ERROR_NOT_PAUSED": "ℹ️ Подписка не на паузе.",
+  "MENU_CABINET": "🖥 Кабинет"
 }
