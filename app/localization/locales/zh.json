@@ -2359,5 +2359,6 @@
   "SUBSCRIPTION_PAUSE_ERROR_TOO_LITTLE_REMAINING": "❌ Too little time is left on the subscription to pause it.",
   "SUBSCRIPTION_PAUSE_ERROR_LIMIT_REACHED": "❌ Pause limit reached. The next pause is available from {date}.",
   "SUBSCRIPTION_PAUSE_ERROR_INVALID_DAYS": "❌ Invalid pause duration.",
-  "SUBSCRIPTION_PAUSE_ERROR_NOT_PAUSED": "ℹ️ The subscription is not paused."
+  "SUBSCRIPTION_PAUSE_ERROR_NOT_PAUSED": "ℹ️ The subscription is not paused.",
+  "MENU_CABINET": "🖥 Cabinet"
 }
