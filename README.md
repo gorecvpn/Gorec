@@ -6,7 +6,7 @@
 
 Принимает оплату, выдаёт подписки, управляет пользователями — пока вы спите.
 
-[![Python 3.13+](https://img.shields.io/badge/Python-3.13+-3776AB?style=for-the-badge&logo=python&logoColor=white)](https://python.org)
+[![Python 3.14+](https://img.shields.io/badge/Python-3.14+-3776AB?style=for-the-badge&logo=python&logoColor=white)](https://python.org)
 [![PostgreSQL](https://img.shields.io/badge/PostgreSQL-15+-4169E1?style=for-the-badge&logo=postgresql&logoColor=white)](https://postgresql.org)
 [![Docker](https://img.shields.io/badge/Docker-Ready-2496ED?style=for-the-badge&logo=docker&logoColor=white)](https://www.docker.com/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green?style=for-the-badge)](LICENSE)
@@ -51,7 +51,7 @@ GorecBot — полнофункциональная платформа для п
 
 ### 💳 Платежи
 
-- 🏦 **27 платёжных провайдеров** одновременно
+- 🏦 **Более 20 платёжных провайдеров** одновременно
 - 💰 Единый баланс: пополнение любым способом → покупка с баланса
 - ⚡ Автопокупка подписки после пополнения
 - 💾 Рекуррентные платежи (сохранённые карты)
@@ -69,7 +69,7 @@ GorecBot — полнофункциональная платформа для п
 - 🏷 Промокоды (деньги, дни подписки, триалы)
 - 👥 Реферальная программа с выводом средств
 - 👥 Партнерская система
-- 📨 Рассылки по сегментам пользователей
+- 📨 Рассылки по [условиям аудитории](docs/broadcast_audiences.md) с предпросмотром получателей
 - 🌐 Кастомные лендинги с аналитикой
 - 🎮 Конкурсы и ежедневные игры с призами
 - 🎯 Персональные предложения и скидки
@@ -151,7 +151,6 @@ GorecBot поддерживает полный кросс-канальный ж�
 |:---:|:---|:---|:---:|
 | ⭐ | **Telegram Stars** | Звёзды Telegram | XTR |
 | 🏦 | **YooKassa** | Карты, СБП | RUB |
-| 🏦 | **YooKassa СБП** | Система быстрых платежей | RUB |
 | 🪙 | **CryptoBot** | USDT, TON, BTC, ETH | Crypto |
 | 🪙 | **Heleket** | USDT, мульти-сеть | Crypto |
 | 💳 | **CloudPayments** | Карты, 3D-Secure | RUB |
@@ -163,7 +162,6 @@ GorecBot поддерживает полный кросс-канальный ж�
 | 💳 | **MulenPay** | Карты | RUB |
 | 💳 | **RioPay** | Карты | RUB |
 | 💳 | **SeverPay** | СБП, карты | RUB |
-| 🤝 | **[PayPear](https://t.me/Paymen1_Manager)** | Карты, СБП, SberPay, T-Pay | RUB |
 | 🤝 | **[RollyPay](https://rollypay.io/)** | СБП, карты, крипто | RUB → USDT |
 | 🤝 | **[AuraPay](https://aurapay.tech/)** | Карты, СБП | RUB |
 | 🤝 | **[Overpay](https://overpay.pro/)** | Карты, СБП | RUB |
@@ -173,6 +171,7 @@ GorecBot поддерживает полный кросс-канальный ж�
 | 🍩 | **[Donut](https://t.me/donut_payment)** | Карты, СБП по телефону, СБП QR (P2P) | RUB |
 | 🌋 | **Lava Business** | Карты, СБП (gate.lava.ru) | RUB |
 | 💳 | **CisPay** | СБП, карты (api.cispay.app) | RUB |
+| 💳 | **Cashera** | СБП, карты, зарубежные карты, крипта, CryptoBot (api.cashera.cash) | RUB → USDT |
 | 💳 | **TabPay** | СБП, карты с 3-D Secure (tabpay.org) | RUB |
 | 💳 | **ParityPay** | СБП, карты (api.paritypay.net) | RUB |
 | 🍎 | **Apple In-App Purchase** | Покупки через iOS App Store | USD |
@@ -190,15 +189,44 @@ docker compose up -d
 ```
 
 
+> [!IMPORTANT]
+> **Обновляетесь с версии на PostgreSQL 15?** После `git pull` выполните `make pg-upgrade` —
+> скрипт сделает резервную копию и перенесёт базу на PostgreSQL 18 без потерь.
+> Подробно: [docs/postgresql-18-upgrade.md](docs/postgresql-18-upgrade.md)
+
+### Чёрный список пользователей
+
+Общий `blacklist.txt` в этом репозитории не поставляется. В `.env.example` проверка
+выключена, а `BLACKLIST_GITHUB_URL` оставлен пустым. Для использования проверки
+сначала укажите URL собственного доступного текстового списка на GitHub, затем
+установите `BLACKLIST_CHECK_ENABLED=true` и перезапустите бот.
+
+Формат файла: один Telegram ID на строку; после `#` можно указать `@username`
+и причину блокировки. Пустые строки и строки, начинающиеся с `#`, пропускаются.
+Числа ниже — условные примеры, замените их своими данными:
+
+```text
+# Комментарий
+100000001 # @example_user причина блокировки
+100000002
+```
+
+`BLACKLIST_UPDATE_INTERVAL_HOURS` задаёт интервал обновления в часах,
+`BLACKLIST_IGNORE_ADMINS=true` исключает администраторов из `ADMIN_IDS` из проверки.
+При обновлении существующей установки удалите старый URL, заканчивающийся на
+`remnawave-bedolaga-telegram-bot/refs/heads/main/blacklist.txt`, из своего `.env`
+и замените его своим источником. Пока источник не настроен, оставьте проверку
+выключенной. Изменение `.env.example` не меняет уже созданный `.env`.
+
 ---
 
 ## 🏗 Стек
 
 | | Компонент | Технология |
 |:---:|:---|:---|
-| 🐍 | Язык | Python 3.13, полностью async |
+| 🐍 | Язык | Python 3.14, полностью async |
 | 🤖 | Telegram | aiogram 3.x |
-| 🗄 | База данных | PostgreSQL + SQLAlchemy 2.x + Alembic |
+| 🗄 | База данных | PostgreSQL 18 + SQLAlchemy 2.x + Alembic |
 | 🔴 | Кэш/очереди | Redis |
 | ⚡ | Web-сервер | FastAPI (webhook, платежи, Cabinet API) |
 | 📝 | Логирование | structlog |
@@ -240,3 +268,20 @@ docker compose up -d
 
 </div>
 
+### Хранение токенов NaloGO
+
+По умолчанию `NALOGO_STORAGE_PATH=./data/nalogo_tokens.json`: в Docker эта
+директория сохраняется в подключённом томе `./data`. Токены записываются
+атомарно с правами `0600`; каталог должен быть доступен пользователю приложения
+для записи. Ошибка сохранения отражается в журнале, текущий токен остаётся в памяти.
+
+При обновлении проверьте существующий `.env`: явно заданный старый путь
+`./nalogo_tokens.json` автоматически не меняется. Для переноса остановите бот,
+переместите существующий файл в каталог `data` и обновите `NALOGO_STORAGE_PATH`,
+сохранив владельца файла и права `0600`. Не публикуйте содержимое файла: в нём
+находятся access- и refresh-токены налогового аккаунта.
+
+При действующем сохранённом токене повторный вход по паролю не нужен;
+истекающий токен обновляется через refresh. После неоднозначной ошибки выпуска
+чек остаётся на ручной проверке. Повторная отправка из неё допустима только
+после проверки, что чек действительно не был создан.

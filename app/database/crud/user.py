@@ -11,6 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.config import settings
+from app.database.auth_methods import OAUTH_PROVIDER_COLUMNS
 from app.database.constants import POSTGRES_INT4_MAX, POSTGRES_INT4_MIN
 from app.database.crud.discount_offer import get_latest_claimed_offer_for_user
 from app.database.crud.promo_group import get_default_promo_group
@@ -671,12 +672,14 @@ async def add_user_balance_by_id(
 
 
 async def lock_user_for_pricing(db: AsyncSession, user_id: int) -> User:
-    """Lock user row with FOR UPDATE and return refreshed instance.
+    """Lock user row with FOR NO KEY UPDATE and return refreshed instance.
 
     Call BEFORE computing prices that depend on promo offer state
     to prevent TOCTOU race conditions where two concurrent requests
     both read the same promo offer discount and charge a discounted price.
     """
+    # Balance/discount changes never alter the User primary key. Allow ledger
+    # FK KEY SHARE while a recurring payment owns the subscription row.
     result = await db.execute(
         select(User)
         .where(User.id == user_id)
@@ -685,7 +688,7 @@ async def lock_user_for_pricing(db: AsyncSession, user_id: int) -> User:
             selectinload(User.promo_group),
             selectinload(User.subscriptions).selectinload(Subscription.tariff),
         )
-        .with_for_update()
+        .with_for_update(key_share=True)
         .execution_options(populate_existing=True)
     )
     return result.scalar_one()
@@ -1147,6 +1150,7 @@ def _users_list_conditions(
                             SubscriptionStatus.LIMITED.value,
                         )
                     ),
+                    Subscription.end_date > now,
                     Subscription.traffic_limit_gb > 0,
                     Subscription.traffic_used_gb >= Subscription.traffic_limit_gb * threshold,
                 )
@@ -1896,12 +1900,6 @@ async def clear_email_change_pending(db: AsyncSession, user: User) -> None:
 
 # Single source of truth: provider name → User model column name.
 # Imported by account_linking.py and account_merge_service.py.
-OAUTH_PROVIDER_COLUMNS: dict[str, str] = {
-    'google': 'google_id',
-    'yandex': 'yandex_id',
-    'discord': 'discord_id',
-    'vk': 'vk_id',
-}
 
 
 async def get_user_by_oauth_provider(db: AsyncSession, provider: str, provider_id: str) -> User | None:

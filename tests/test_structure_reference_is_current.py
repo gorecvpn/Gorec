@@ -11,11 +11,11 @@
 
 from __future__ import annotations
 
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 
 import pytest
 
-from scripts.generate_structure_reference import OUTPUT, build, tracked_paths
+from scripts.generate_structure_reference import OUTPUT, REPO_ROOT, build, render_entries, tracked_paths
 
 
 REBUILD_HINT = 'выполните `make docs-structure` и закоммитьте результат'
@@ -71,3 +71,42 @@ def test_payment_mixins_are_documented() -> None:
     mixins = sorted(Path('app/services/payment').glob('*.py'))
     missing = [m.name for m in mixins if m.name != '__init__.py' and f'`{m.as_posix()}`' not in document]
     assert not missing, f'платёжные миксины не попали в документ: {missing}'
+
+
+def test_order_does_not_depend_on_platform_case_folding() -> None:
+    """WindowsPath сравнивается без учёта регистра, PosixPath — байтово.
+
+    Без явного ключа сортировки пересборка на Windows ставила `.github/ISSUE_TEMPLATE`
+    после `dependabot.yml`, и `--check` в CI краснел. Порядок обязан быть один везде,
+    поэтому на вход идут именно Windows-пути.
+    """
+    lines = render_entries([PureWindowsPath('Zeta.md'), PureWindowsPath('alpha.md')], REPO_ROOT)
+    assert lines == ['- `Zeta.md` — файл', '- `alpha.md` — файл']
+
+
+@pytest.mark.parametrize('tracked_instructions', [False, True])
+@pytest.mark.parametrize('relative_path', ['AGENTS.md', 'app/AGENTS.md'])
+def test_local_instructions_do_not_change_checkout_structure(
+    tmp_path, monkeypatch, tracked_instructions, relative_path
+):
+    """Local instructions stay local; new source files and committed instructions remain visible."""
+    import shutil
+    import subprocess
+
+    from scripts import generate_structure_reference as generator
+
+    git = shutil.which('git')
+    assert git is not None
+    subprocess.run([git, 'init', '-q', str(tmp_path)], check=True)  # noqa: S603 — isolated fixture
+    instructions = tmp_path / relative_path
+    instructions.parent.mkdir(parents=True, exist_ok=True)
+    instructions.write_text('Local instructions\n')
+    (tmp_path / 'new_module.py').write_text('def new_function(): pass\n')
+    if tracked_instructions:
+        subprocess.run([git, 'add', relative_path], cwd=tmp_path, check=True)  # noqa: S603 — fixed test paths
+    monkeypatch.setattr(generator, 'ROOT', tmp_path)
+
+    paths = {path.as_posix() for path in generator.tracked_paths()}
+
+    assert 'new_module.py' in paths
+    assert (relative_path in paths) == tracked_instructions
