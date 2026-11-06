@@ -32,6 +32,7 @@ _spec.loader.exec_module(_guard)
 
 #: Двигают дату, но от текущего срока и серверов подписки ничего не берут — с причиной.
 EXEMPT: dict[str, str] = {
+    'app/services/subscription_pause_service.py::apply_pause_state': 'пауза пользователем: на открытом грейсе пауза запрещена, дата лишь замораживается',
     'app/database/models.py::Subscription.extend_subscription': 'сам метод модели — починку зовут его вызывающие',
     'app/database/crud/subscription.py::activate_pending_subscription': 'отложенная подписка грейса не получала',
     'app/database/crud/subscription.py::activate_pending_trial_subscription': 'отложенный триал грейса не получал',

@@ -153,6 +153,15 @@ def _build_subscription_detail_keyboard(
 
     buttons = []
 
+    if sub is not None and getattr(sub, 'is_paused', False) is True:
+        from app.handlers.subscription.pause import pause_keyboard_rows
+
+        texts = get_texts(language)
+        buttons.append([types.InlineKeyboardButton(text='🔗 Ссылка подключения', callback_data=f'sl:{sub_id}')])
+        buttons.extend(pause_keyboard_rows(texts, sub))
+        buttons.append([types.InlineKeyboardButton(text='◀️ К списку подписок', callback_data='my_subscriptions')])
+        return types.InlineKeyboardMarkup(inline_keyboard=buttons)
+
     if not is_inactive:
         buttons.append(
             [
@@ -351,6 +360,12 @@ async def show_subscription_detail(
     subscription_link = get_display_subscription_link(subscription)
     if subscription_link and not settings.should_hide_subscription_link():
         text += f'\n🔗 <code>{html.escape(subscription_link)}</code>'
+
+    from app.handlers.subscription.pause import pause_status_block
+
+    pause_block = pause_status_block(get_texts(db_user.language), subscription)
+    if pause_block:
+        text = pause_block + '\n\n' + text
 
     keyboard = _build_subscription_detail_keyboard(sub_id, sub=subscription, language=db_user.language)
 

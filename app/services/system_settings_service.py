@@ -173,6 +173,7 @@ class BotConfigurationService:
         'TEST': 'Тестовые учётные записи',
         'YANDEX': 'Конверсии Яндекса',
         'CORE': '🤖 Основные настройки',
+        'SUBSCRIPTION_PAUSE': '⏸ Пауза подписки',
         'SUPPORT': '💬 Поддержка и тикеты',
         'REGISTRATION_ACCESS': '🔐 Регистрация и доступ',
         'LOCALIZATION': '🌍 Языки интерфейса',
@@ -255,6 +256,7 @@ class BotConfigurationService:
 
     CATEGORY_DESCRIPTIONS: dict[str, str] = {
         'CORE': 'Базовые параметры работы бота и обязательные ссылки.',
+        'SUBSCRIPTION_PAUSE': 'Пауза (заморозка) подписки пользователем: длительность, лимиты, сквад «Пауза» в панели.',
         'SUPPORT': 'Контакты поддержки, SLA и режимы обработки обращений.',
         'REGISTRATION_ACCESS': 'Закрытая регистрация и допустимые способы приглашения новых пользователей.',
         'LOCALIZATION': 'Доступные языки, локализация интерфейса и выбор языка.',
@@ -528,6 +530,7 @@ class BotConfigurationService:
         'REDIS_': 'REDIS',
         'REMNAWAVE': 'REMNAWAVE',
         'TRIAL_': 'TRIAL',
+        'SUBSCRIPTION_PAUSE_': 'SUBSCRIPTION_PAUSE',
         'TRAFFIC_PACKAGES': 'TRAFFIC_PACKAGES',
         'PRICE_TRAFFIC': 'TRAFFIC_PACKAGES',
         'TRAFFIC_': 'TRAFFIC',

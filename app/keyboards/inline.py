@@ -1245,7 +1245,13 @@ def get_subscription_keyboard(
         if happ_row:
             keyboard.append(happ_row)
 
-        if is_trial:
+        if subscription is not None and getattr(subscription, 'is_paused', False) is True:
+            # Подписка на паузе: только «Выйти из паузы» — платные изменения
+            # (продление считается от замороженной даты) после выхода из паузы.
+            from app.handlers.subscription.pause import pause_keyboard_rows
+
+            keyboard.extend(pause_keyboard_rows(texts, subscription))
+        elif is_trial:
             keyboard.append(
                 [InlineKeyboardButton(text=texts.MENU_BUY_SUBSCRIPTION, callback_data='subscription_upgrade')]
             )
@@ -1300,6 +1306,9 @@ def get_subscription_keyboard(
                         ),
                     ]
                 )
+                from app.handlers.subscription.pause import pause_keyboard_rows
+
+                keyboard.extend(pause_keyboard_rows(texts, subscription))
 
             # Ряд: [Настройки] [Тариф] (если режим тарифов)
             settings_row = [
