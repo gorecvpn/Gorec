@@ -366,7 +366,7 @@ async def test_migration_upgrade_preserves_historical_payment(postgres_database)
 
     from tests.fixtures.postgres_db import postgres_engine
 
-    migration = import_module('migrations.alembic.versions.0136_cispay_sandbox_and_polling')
+    migration = import_module('migrations.alembic.versions.0140_cispay_sandbox_and_polling')
     async with postgres_engine(postgres_database, list(Base.metadata.sorted_tables)) as engine:
         async with engine.begin() as conn:
             await conn.execute(

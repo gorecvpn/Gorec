@@ -54,7 +54,7 @@ async def test_concurrent_stale_writer_cannot_restore_consumed_bytes(postgres_da
 
 
 async def test_migration_does_not_touch_existing_quota_and_prevents_lossy_downgrade(postgres_database):
-    migration = _load('0139_traffic_accounting.py')
+    migration = _load('0143_traffic_accounting.py')
     async with postgres_engine(postgres_database, list(Base.metadata.sorted_tables)) as engine:
         async with engine.begin() as connection:
 

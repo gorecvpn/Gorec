@@ -17,7 +17,7 @@ pytestmark = pytest.mark.postgres
 
 @pytest.mark.parametrize('existing', [True, False])
 async def test_pending_expiry_migration_preserves_existing_rights(postgres_database, existing):
-    migration = _load('0133_pending_panel_expiry.py')
+    migration = _load('0137_pending_panel_expiry.py')
     async with postgres_engine(postgres_database, list(Base.metadata.sorted_tables)) as engine:
         async with engine.begin() as conn:
 

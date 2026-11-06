@@ -16,7 +16,7 @@ pytestmark = pytest.mark.postgres
 
 
 async def test_reset_intent_migration_upgrade_downgrade_and_safety(postgres_database):
-    migration = _load('0134_paid_traffic_reset_intents.py')
+    migration = _load('0138_paid_traffic_reset_intents.py')
     async with postgres_engine(postgres_database, list(Base.metadata.sorted_tables)) as engine:
         async with engine.begin() as conn:
 

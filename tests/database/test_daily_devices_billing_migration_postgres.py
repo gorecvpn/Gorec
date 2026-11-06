@@ -14,7 +14,7 @@ pytestmark = pytest.mark.postgres
 
 
 async def test_daily_billing_migration_preserves_legacy_and_protects_new_policy(postgres_database):
-    migration = _load('0138_daily_selected_devices_billing.py')
+    migration = _load('0142_daily_selected_devices_billing.py')
     async with postgres_engine(postgres_database, list(Base.metadata.sorted_tables)) as engine:
         async with engine.begin() as connection:
 

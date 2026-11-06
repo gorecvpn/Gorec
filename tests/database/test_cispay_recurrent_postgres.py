@@ -109,7 +109,7 @@ async def test_migration_up_down_up_preserves_existing_rows(postgres_database):
         connection = await db.connection()
 
         def migrate(sync):
-            migration = importlib.import_module('migrations.alembic.versions.0140_cispay_subscriptions')
+            migration = importlib.import_module('migrations.alembic.versions.0144_cispay_subscriptions')
             with Operations.context(MigrationContext.configure(sync)):
                 migration.downgrade()  # Fixture provisions the complete application schema.
                 migration.upgrade()

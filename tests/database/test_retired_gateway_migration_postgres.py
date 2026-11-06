@@ -27,7 +27,7 @@ def _load(filename):
 
 @pytest.mark.parametrize('existing_table', [True, False], ids=['upgrade-existing', 'fresh-metadata'])
 async def test_retirement_preserves_money_and_neighbors(postgres_database, existing_table):
-    migration = _load('0132_retire_paypear.py')
+    migration = _load('0136_retire_paypear.py')
     async with postgres_engine(postgres_database, list(Base.metadata.sorted_tables)) as engine:
         async with engine.begin() as conn:
 

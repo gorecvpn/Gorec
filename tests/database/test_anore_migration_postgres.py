@@ -14,7 +14,7 @@ pytestmark = pytest.mark.postgres
 
 
 async def test_anore_upgrade_bootstrap_and_downgrade_guard(postgres_database):
-    migration = _load('0135_create_anore_payments.py')
+    migration = _load('0139_create_anore_payments.py')
     async with postgres_engine(postgres_database, list(Base.metadata.sorted_tables)) as engine:
         async with engine.begin() as conn:
 

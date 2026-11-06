@@ -12,7 +12,7 @@ pytestmark = pytest.mark.postgres
 
 
 async def test_intent_migration_preserves_completed_checkout_identity(postgres_database):
-    migration = _load('0137_tariff_purchase_intents.py')
+    migration = _load('0141_tariff_purchase_intents.py')
     async with postgres_engine(postgres_database, list(Base.metadata.sorted_tables)) as engine:
         async with engine.begin() as connection:
 
