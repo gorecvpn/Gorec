@@ -69,7 +69,7 @@ async def preview_tariff_switch(
             detail='Tariffs mode is not enabled',
         )
 
-    subscription = await resolve_subscription(db, user, subscription_id)
+    subscription = await _resolve_switch_subscription(db, user, subscription_id)
     ensure_not_paused(subscription)
 
     if not subscription or not subscription.tariff_id:
@@ -231,7 +231,7 @@ async def switch_tariff(
             detail='Tariffs mode is not enabled',
         )
 
-    resolved = await resolve_subscription(db, user, subscription_id)
+    resolved = await _resolve_switch_subscription(db, user, subscription_id)
     ensure_not_paused(resolved)
 
     if not resolved or not resolved.tariff_id:
