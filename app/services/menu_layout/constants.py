@@ -293,7 +293,7 @@ DEFAULT_MENU_CONFIG: dict[str, Any] = {
         'raffle': {
             'type': 'builtin',
             'builtin_id': 'raffle',
-            'text': {'ru': '🎁 Розыгрыш', 'en': '🎁 Raffle'},
+            'text': {'ru': '🎁 Розыгрыш', 'en': '🎁 Raffle', 'ua': '🎁 Розіграш', 'zh': '🎁 抽奖', 'fa': '🎁 قرعه‌کشی'},
             'action': 'menu_raffle',
             'enabled': True,
             'visibility': 'all',
@@ -533,7 +533,7 @@ BUILTIN_BUTTONS_INFO: list[dict[str, Any]] = [
     },
     {
         'id': 'raffle',
-        'default_text': {'ru': '🎁 Розыгрыш', 'en': '🎁 Raffle'},
+        'default_text': {'ru': '🎁 Розыгрыш', 'en': '🎁 Raffle', 'ua': '🎁 Розіграш', 'zh': '🎁 抽奖', 'fa': '🎁 قرعه‌کشی'},
         'callback_data': 'menu_raffle',
         'default_conditions': {'raffle_visible': True},
         'supports_dynamic_text': False,

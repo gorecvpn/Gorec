@@ -7082,5 +7082,11 @@
   "RECURRENT_UI_LAVA_PRICE_MISMATCH": "The Lava product costs {price} ₽, but subscription renewal costs {renewal} ₽ for {days} days. Create a product with the current price.",
   "RECURRENT_UI_SBP_NO_PERIOD_PRICE": "The tariff has no price for {days} days — SBP automatic renewal is unavailable",
   "WELCOME_FALLBACK_NAME": "friend",
-  "STARS_TOPUP_DESCRIPTION": "Balance top-up of {amount}"
+  "STARS_TOPUP_DESCRIPTION": "Balance top-up of {amount}",
+  "ADMIN_PROMOCODE_TYPE_RAFFLE": "🎟 Raffle tickets",
+  "ADMIN_PROMOCODE_UI_RAFFLE": "🎟 Raffle tickets",
+  "ADMIN_PROMOCODE_UI_RAFFLE_SHORT": "Raffle tickets",
+  "ADMIN_PROMOCODE_UI_RAFFLE_SUMMARY": "🎟 <b>Tickets:</b> {v0}\n",
+  "ADMIN_PROMOCODE_UI_RAFFLE_TICKETS": "🎟 Tickets: {v0}\n",
+  "ADMIN_PROMOCODE_UI_RAFFLE_TICKETS_B": "🎟 <b>Tickets:</b> {v0}\n"
 }
