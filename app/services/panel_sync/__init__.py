@@ -43,9 +43,9 @@ from app.services.panel_sync.tags import normalize_panel_tag, resolve_panel_user
 from app.services.panel_sync.traffic_strategy import get_traffic_reset_strategy
 from app.services.panel_sync.writer import (
     PanelWriteResult,
+    patch_managed_traffic,
     patch_panel_account,
     patch_panel_pause,
-    patch_managed_traffic,
     patch_panel_squads,
     push_subscription,
 )
@@ -78,9 +78,9 @@ __all__ = [
     'panel_expire_at',
     'panel_id_is_free_for',
     'panel_status_for_new_subscription',
+    'patch_managed_traffic',
     'patch_panel_account',
     'patch_panel_pause',
-    'patch_managed_traffic',
     'patch_panel_squads',
     'project_onto_subscription',
     'push_all_subscriptions',
